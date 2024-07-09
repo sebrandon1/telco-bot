@@ -1,0 +1,46 @@
+name: Daily DCI Update
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  ten-day:
+    runs-on: ubuntu-22.04
+    env:
+      SHELL: /bin/bash
+      NUM_DAYS: 10
+    
+    steps:
+      - name: Install the JQ package
+        run: sudo apt-get install jq -y
+
+      - name: Clone the telco-bot repository
+        uses: actions/checkout@v4
+
+      # Clone the go-dci repository
+      - name: Checkout go-dci
+        uses: actions/checkout@v4
+        with:
+          repository: 'sebrandon1/go-dci'
+        
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build the go-dci project
+        run: go build
+        working-directory: go-dci
+
+      - name: Set the config file via the go-dci project
+        run: ./go-dci config set --accesskey=${{ secrets.DCI_ACCESS_KEY }} --secretkey=${{ secrets.DCI_SECRET_KEY }}
+        working-directory: go-dci
+
+      - name: Run the go-dci project and collect the JSON output
+        run: ./go-dci jobs -d ${{ env.NUM_DAYS }} --output=json > dci-output.json
+        working-directory: go-dci
+
+      - name: Parse the JSON output and print the results
+        run: ./scripts/send-slack-msg.sh ${{ secrets.SLACK_WEBHOOK_URL }} dci-output.json ${{ env.NUM_DAYS }}
