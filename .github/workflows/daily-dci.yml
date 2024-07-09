@@ -40,7 +40,7 @@ jobs:
         working-directory: go-dci
 
       - name: Run the go-dci project and collect the JSON output
-        run: ./go-dci jobs -d ${{ env.NUM_DAYS }} --output=json > ${{GITHUB_WORKSPACE}}/dci-output.json
+        run: ./go-dci jobs -d ${{ env.NUM_DAYS }} --output=json > ${GITHUB_WORKSPACE}/dci-output.json
         working-directory: go-dci
 
       - name: Parse the JSON output and print the results
