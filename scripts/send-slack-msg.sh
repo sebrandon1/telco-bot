@@ -20,9 +20,11 @@ for row in $(echo "${VERSIONS_BY_VALUE}" | jq -r '.[] | @base64'); do
         echo ${row} | base64 --decode | jq -r ${1}
     }
 
+    # echo "Evaluating key: $(_jq '.key') $RUNS_BY_COMMIT_CTR"
+
     # Check if the version matches the semver regex
     if [[ ! $(_jq '.key') =~ $SEMVER_REGEX ]]; then
-        let "RUNS_BY_COMMIT_CTR=RUNS_BY_COMMIT_CTR+1"
+        let "RUNS_BY_COMMIT_CTR=RUNS_BY_COMMIT_CTR+$(_jq '.value')"
     else
         VERSION=$(_jq '.key')
         COUNT=$(_jq '.value')
@@ -40,4 +42,5 @@ echo $MESSAGE
 DATA="{\"message\"   : \"${MESSAGE}\"}"
 
 # Send the message to Slack
-curl -X POST -H 'Content-type: application/json charset=UTF-8' --data "$DATA" $SLACK_WEBHOOK_URL
+# curl -X POST -H 'Content-type: application/json charset=UTF-8' --data "$DATA" $SLACK_WEBHOOK_URL
+
