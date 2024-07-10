@@ -42,5 +42,5 @@ echo $MESSAGE
 DATA="{\"message\"   : \"${MESSAGE}\"}"
 
 # Send the message to Slack
-# curl -X POST -H 'Content-type: application/json charset=UTF-8' --data "$DATA" $SLACK_WEBHOOK_URL
+curl -X POST -H 'Content-type: application/json charset=UTF-8' --data "$DATA" $SLACK_WEBHOOK_URL
 
