@@ -2,10 +2,11 @@
 
 SEMVER_REGEX="^v[0-9]+\.[0-9]+\.[0-9]+$"
 
-# Slack Incoming Webhook URL
+# Collect the arguments
 SLACK_WEBHOOK_URL=$1
 JSON_FILE=$2
-DAYS_BACK=$3
+OCP_VERSION_FILE=$3
+DAYS_BACK=$4
 
 NUMBER_OF_RECORDS=$(cat $JSON_FILE | jq '.jobs | length')
 
@@ -36,6 +37,24 @@ done
 if [ $RUNS_BY_COMMIT_CTR -gt 0 ]; then
     MESSAGE="$MESSAGE\n\nThere have been $RUNS_BY_COMMIT_CTR runs by commit hash."
 fi
+
+MESSAGE="$MESSAGE\n\nThe following OCP versions have been tested against in the last $DAYS_BACK days:"
+
+for row in $(cat $OCP_VERSION_FILE | jq -r '.[].[] | @base64'); do
+    _jq() {
+        echo ${row} | base64 --decode | jq -r ${1}
+    }
+
+    # Skip any counts that are 0
+    if [ $(_jq '.run_count') -eq 0 ]; then
+        continue
+    fi
+
+    VERSION=$(_jq '.ocp_version')
+    COUNT=$(_jq '.run_count')
+
+    MESSAGE="$MESSAGE\nOCP Version: $VERSION -- Run Count: $COUNT"
+done
 
 echo $MESSAGE
 

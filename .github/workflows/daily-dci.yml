@@ -43,8 +43,12 @@ jobs:
         run: ./go-dci jobs -d ${{ env.NUM_DAYS }} --output=json > ${GITHUB_WORKSPACE}/dci-output.json
         working-directory: go-dci
 
+      - name: Run the go-dci project and collect the ocpVersion output
+        run: ./go-dci ocpcount -d ${{ env.NUM_DAYS }} --output=json > ${GITHUB_WORKSPACE}/dci-ocpversion.json
+        working-directory: go-dci
+
       - name: Print the JSON output
         run: cat ${GITHUB_WORKSPACE}/dci-output.json
 
       - name: Parse the JSON output and print the results
-        run: ./scripts/send-slack-msg.sh ${{ secrets.SLACK_WEBHOOK_URL }} dci-output.json ${{ env.NUM_DAYS }}
+        run: ./scripts/send-slack-msg.sh ${{ secrets.SLACK_WEBHOOK_URL }} dci-output.json dci-ocpversion.json ${{ env.NUM_DAYS }}
