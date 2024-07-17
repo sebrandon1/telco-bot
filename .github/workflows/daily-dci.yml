@@ -50,5 +50,8 @@ jobs:
       - name: Print the JSON output
         run: cat ${GITHUB_WORKSPACE}/dci-output.json
 
+      - name: Print the ocpVersion output
+        run: cat ${GITHUB_WORKSPACE}/dci-ocpversion.json
+
       - name: Parse the JSON output and print the results
         run: ./scripts/send-slack-msg.sh ${{ secrets.SLACK_WEBHOOK_URL }} dci-output.json dci-ocpversion.json ${{ env.NUM_DAYS }}

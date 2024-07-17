@@ -38,6 +38,14 @@ if [ $RUNS_BY_COMMIT_CTR -gt 0 ]; then
     MESSAGE="$MESSAGE\n\nThere have been $RUNS_BY_COMMIT_CTR runs by commit hash."
 fi
 
+# Use jq to verify OCP_VERSION_FILE is valid JSON
+jq . $OCP_VERSION_FILE
+
+if [ $? -ne 0 ]; then
+    echo "The OCP_VERSION_FILE is not valid JSON. Exiting."
+    exit 1
+fi
+
 MESSAGE="$MESSAGE\n\nThe following OCP versions have been tested against in the last $DAYS_BACK days:"
 
 for row in $(cat $OCP_VERSION_FILE | jq -r '.[].[] | @base64'); do
