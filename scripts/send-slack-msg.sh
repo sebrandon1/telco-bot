@@ -48,7 +48,7 @@ fi
 
 MESSAGE="$MESSAGE\n\nThe following OCP versions have been tested against in the last $DAYS_BACK days:"
 
-for row in $(cat $OCP_VERSION_FILE | jq -r '.[].[] | @base64'); do
+for row in $(cat $OCP_VERSION_FILE | jq -r '.ocp_versions[] | @base64'); do
     _jq() {
         echo ${row} | base64 --decode | jq -r ${1}
     }
