@@ -1,0 +1,48 @@
+name: Quay Statistics Update
+
+on:
+  schedule:
+    # weekly cron job
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  quay-query:
+    runs-on: ubuntu-22.04
+    env:
+      SHELL: /bin/bash
+      NUM_DAYS: 10
+      REPO_NAME: cnf-certification-test
+      NS_NAME: testnetworkfunction
+      
+    steps:
+      - name: Install the JQ package
+        run: sudo apt-get install jq -y
+
+      - name: Clone the telco-bot repository
+        uses: actions/checkout@v4
+
+      # Clone the go-quay repository
+      - name: Checkout go-dci
+        uses: actions/checkout@v4
+        with:
+          repository: 'sebrandon1/go-quay'
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build the go-quay project
+        run: go build
+        working-directory: go-quay
+
+      - name: Run the go-quay project to gather the last 7 days of Quay statistics
+        run: |
+          TODAY=$(date +%m/%d/%Y)
+          SEVEN_DAYS_AGO=$(date --date "7 days ago" +%m/%d/%Y)
+
+          ./go-quay get aggregatelogs -t ${{ secrets.QUAY_TOKEN }} -n $NS_NAME -r $REPO_NAME -s $SEVEN_DAYS_AGO -e $TODAY  > ${GITHUB_WORKSPACE}/quay-output.json
+      
+      - name: Send the message to Slack
+        run: ./scripts/quay-stats-msg.sh ${{ secrets.SLACK_WEBHOOK_URL }} ${GITHUB_WORKSPACE}/quay-output.json $SEVEN_DAYS_AGO $TODAY
