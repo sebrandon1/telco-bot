@@ -44,6 +44,7 @@ jobs:
           SEVEN_DAYS_AGO=$(date --date "7 days ago" +%m/%d/%Y)
 
           ./go-quay get aggregatelogs -t ${{ secrets.QUAY_TOKEN }} -n $NS_NAME -r $REPO_NAME -s $SEVEN_DAYS_AGO -e $TODAY  > ${GITHUB_WORKSPACE}/quay-output.json
+        working-directory: go-quay
       
       - name: Send the message to Slack
         run: ./scripts/quay-stats-msg.sh ${{ secrets.QUAY_QUERY_SLACK_URL }} ${GITHUB_WORKSPACE}/quay-output.json $SEVEN_DAYS_AGO $TODAY
