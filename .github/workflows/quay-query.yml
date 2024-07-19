@@ -23,10 +23,11 @@ jobs:
         uses: actions/checkout@v4
 
       # Clone the go-quay repository
-      - name: Checkout go-dci
+      - name: Checkout go-quay
         uses: actions/checkout@v4
         with:
           repository: 'sebrandon1/go-quay'
+          path: go-quay
 
       - name: Set up Go
         uses: actions/setup-go@v5
