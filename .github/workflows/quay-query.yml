@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       SHELL: /bin/bash
-      NUM_DAYS: 10
       REPO_NAME: cnf-certification-test
       NS_NAME: testnetworkfunction
       
@@ -43,7 +42,7 @@ jobs:
           TODAY=$(date +%m/%d/%Y)
           SEVEN_DAYS_AGO=$(date --date "7 days ago" +%m/%d/%Y)
 
-          ./go-quay get aggregatelogs -t ${{ secrets.QUAY_TOKEN }} -n $NS_NAME -r $REPO_NAME -s $SEVEN_DAYS_AGO -e $TODAY  > ${GITHUB_WORKSPACE}/quay-output.json
+          ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN }} -n $NS_NAME -r $REPO_NAME -s $SEVEN_DAYS_AGO -e $TODAY  > ${GITHUB_WORKSPACE}/quay-output.json
         working-directory: go-quay
       
       - name: Send the message to Slack
