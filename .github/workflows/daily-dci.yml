@@ -2,15 +2,16 @@ name: Daily DCI Update
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # weekly
+    - cron: '0 0 * * 0'
   workflow_dispatch:
 
 jobs:
-  ten-day:
+  weekly-query:
     runs-on: ubuntu-22.04
     env:
       SHELL: /bin/bash
-      NUM_DAYS: 10
+      NUM_DAYS: 7
     
     steps:
       - name: Install the JQ package
