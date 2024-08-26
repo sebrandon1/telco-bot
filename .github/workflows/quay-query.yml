@@ -11,8 +11,10 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       SHELL: /bin/bash
-      REPO_NAME: cnf-certification-test
-      NS_NAME: testnetworkfunction
+      REPO_NAME_LEGACY: cnf-certification-test
+      REPO_NAME_CURRENT: certsuite
+      NS_NAME_LEGACY: testnetworkfunction
+      NS_NAME_CURRENT: redhat-best-practices-for-k8s
       
     steps:
       - name: Install the JQ package
@@ -42,6 +44,7 @@ jobs:
           TODAY=$(date +%m/%d/%Y)
           SEVEN_DAYS_AGO=$(date --date "7 days ago" +%m/%d/%Y)
 
+          ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN_LEGACY }} -n ${NS_NAME} -r ${REPO_NAME_LEGACY} -s ${SEVEN_DAYS_AGO} -e ${TODAY}  > ${GITHUB_WORKSPACE}/quay-output-legacy.json
           ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN }} -n ${NS_NAME} -r ${REPO_NAME} -s ${SEVEN_DAYS_AGO} -e ${TODAY}  > ${GITHUB_WORKSPACE}/quay-output.json
         working-directory: go-quay
       
@@ -49,4 +52,9 @@ jobs:
         run: |
           TODAY=$(date +%m/%d/%Y)
           SEVEN_DAYS_AGO=$(date --date "7 days ago" +%m/%d/%Y)
-          ./scripts/quay-stats-msg.sh ${{ secrets.QUAY_QUERY_SLACK_URL }} ${GITHUB_WORKSPACE}/quay-output.json ${SEVEN_DAYS_AGO} ${TODAY}
+
+          # Build the names of the namespace/repo
+          CURRENT_REPO_NAME=${NS_NAME_CURRENT}/${REPO_NAME_CURRENT}
+          LEGACY_REPO_NAME=${NS_NAME_LEGACY}/${REPO_NAME_LEGACY}
+
+          ./scripts/quay-stats-msg.sh ${{ secrets.QUAY_QUERY_SLACK_URL }} ${GITHUB_WORKSPACE}/quay-output-legacy.json ${GITHUB_WORKSPACE}/quay-output.json ${SEVEN_DAYS_AGO} ${TODAY} ${LEGACY_REPO_NAME} ${CURRENT_REPO_NAME}
