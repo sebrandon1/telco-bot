@@ -14,7 +14,7 @@ RUNS_BY_COMMIT_CTR=0
 
 MESSAGE="There have been $NUMBER_OF_RECORDS DCI jobs that have used the certsuite in the last $DAYS_BACK days.\n"
 
-VERSIONS_BY_VALUE=$(cat $JSON_FILE | jq '.jobs | group_by(.tnf_version) | map({key: .[0].tnf_version, value: length})')
+VERSIONS_BY_VALUE=$(cat $JSON_FILE | jq '.jobs | group_by(.certsuite_version) | map({key: .[0].certsuite_version, value: length})')
 
 for row in $(echo "${VERSIONS_BY_VALUE}" | jq -r '.[] | @base64'); do
     _jq() {
