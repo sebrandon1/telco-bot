@@ -47,6 +47,23 @@ jobs:
           ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN_LEGACY }} -n ${NS_NAME} -r ${REPO_NAME_LEGACY} -s ${SEVEN_DAYS_AGO} -e ${TODAY}  > ${GITHUB_WORKSPACE}/quay-output-legacy.json
           ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN }} -n ${NS_NAME} -r ${REPO_NAME} -s ${SEVEN_DAYS_AGO} -e ${TODAY}  > ${GITHUB_WORKSPACE}/quay-output.json
         working-directory: go-quay
+
+      - name: Print the Quay statistics
+        run: |
+          cat ${GITHUB_WORKSPACE}/quay-output-legacy.json
+          cat ${GITHUB_WORKSPACE}/quay-output.json
+
+      - name: Fail if the Quay statistics are empty
+        run: |
+          if [ ! -s ${GITHUB_WORKSPACE}/quay-output-legacy.json ]; then
+            echo "The Quay statistics for the legacy repository are empty"
+            exit 1
+          fi
+
+          if [ ! -s ${GITHUB_WORKSPACE}/quay-output.json ]; then
+            echo "The Quay statistics for the current repository are empty"
+            exit 1
+          fi
       
       - name: Send the message to Slack
         run: |
