@@ -39,6 +39,9 @@ jobs:
         run: go build
         working-directory: go-quay
 
+      - name: Add tmate session
+        uses: mxschmitt/action-tmate@v3
+
       - name: Run the go-quay project to gather the last 7 days of Quay statistics
         run: |
           TODAY=$(date +%m/%d/%Y)
