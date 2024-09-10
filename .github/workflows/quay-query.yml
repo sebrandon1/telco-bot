@@ -51,12 +51,12 @@ jobs:
           echo "Querying the legacy repository: ${NS_NAME_LEGACY}/${REPO_NAME_LEGACY}"
           RESULT=$(./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN_LEGACY }} -n ${NS_NAME_LEGACY} -r ${REPO_NAME_LEGACY} -s ${SEVEN_DAYS_AGO} -e ${TODAY})
           echo "Result of the legacy repository query: ${RESULT}"
-          echo $RESULT > ${GITHUB_WORKSPACE}/quay-output-legacy.json
+          echo "${RESULT}" > ${GITHUB_WORKSPACE}/quay-output-legacy.json
 
           echo "Querying the current repository: ${NS_NAME_CURRENT}/${REPO_NAME_CURRENT}"
           RESULT=$(./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN }} -n ${NS_NAME_CURRENT} -r ${REPO_NAME} -s ${SEVEN_DAYS_AGO} -e ${TODAY}) 
           echo "Result of the current repository query: ${RESULT}"
-          echo $RESULT > ${GITHUB_WORKSPACE}/quay-output.json
+          echo "${RESULT}" > ${GITHUB_WORKSPACE}/quay-output.json
         working-directory: go-quay
 
       - name: Print the Quay statistics
