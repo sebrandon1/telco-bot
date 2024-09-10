@@ -44,7 +44,14 @@ jobs:
           TODAY=$(date +%m/%d/%Y)
           SEVEN_DAYS_AGO=$(date --date "7 days ago" +%m/%d/%Y)
 
+          echo "Querying the Quay statistics for the last 7 days"
+          echo "Today: ${TODAY}"
+          echo "7 days ago: ${SEVEN_DAYS_AGO}"
+          echo "---------------------------------"
+          echo "Querying the legacy repository: ${NS_NAME_LEGACY}/${REPO_NAME_LEGACY}"
           ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN_LEGACY }} -n ${NS_NAME} -r ${REPO_NAME_LEGACY} -s ${SEVEN_DAYS_AGO} -e ${TODAY}  > ${GITHUB_WORKSPACE}/quay-output-legacy.json
+
+          echo "Querying the current repository: ${NS_NAME_CURRENT}/${REPO_NAME_CURRENT}"
           ./go-quay get aggregatedlogs -t ${{ secrets.QUAY_TOKEN }} -n ${NS_NAME} -r ${REPO_NAME} -s ${SEVEN_DAYS_AGO} -e ${TODAY}  > ${GITHUB_WORKSPACE}/quay-output.json
         working-directory: go-quay
 
