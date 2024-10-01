@@ -1,6 +1,6 @@
 module github.com/test-network-function/telco-bot
 
-go 1.23.1
+go 1.23.2
 
 require github.com/slack-go/slack v0.14.0
 
