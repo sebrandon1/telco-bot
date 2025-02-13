@@ -20,17 +20,17 @@ jobs:
       - name: Clone the telco-bot repository
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       # Clone the go-dci repository
       - name: Checkout go-dci
         uses: actions/checkout@v4
         with:
           repository: 'sebrandon1/go-dci'
           path: go-dci
-        
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
 
       - name: Build the go-dci project
         run: go build
