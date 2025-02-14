@@ -23,17 +23,17 @@ jobs:
       - name: Clone the telco-bot repository
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       # Clone the go-quay repository
       - name: Checkout go-quay
         uses: actions/checkout@v4
         with:
           repository: 'sebrandon1/go-quay'
           path: go-quay
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
 
       - name: Build the go-quay project
         run: go build
