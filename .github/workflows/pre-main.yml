@@ -1,0 +1,21 @@
+name: Run shfmt on scripts folder
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  shfmt-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Shfmt
+        uses: mfinelli/setup-shfmt@1a143389339b48c4b48ae3cdc058f3dbe336a701 # v3.0.2
+
+      - name: Run shfmt
+        run: |
+          shfmt -d scripts
