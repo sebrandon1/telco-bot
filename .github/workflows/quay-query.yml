@@ -8,7 +8,7 @@ on:
 
 jobs:
   quay-query:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       SHELL: /bin/bash
       REPO_NAME_LEGACY: cnf-certification-test

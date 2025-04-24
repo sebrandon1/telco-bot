@@ -8,7 +8,7 @@ on:
 
 jobs:
   weekly-query:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       SHELL: /bin/bash
       NUM_DAYS: 7
