@@ -1,0 +1,59 @@
+name: Weekly Jira Team Update
+on:
+  schedule:
+    # weekly on Sundays
+    - cron: '0 0 * * 0'
+  # pull_request:
+  #   branches:
+  #     - main
+  workflow_dispatch:
+
+jobs:
+  weekly-query:
+    runs-on: ubuntu-latest
+    env:
+      SHELL: /bin/bash
+      USERS: 'bpalm@redhat.com speretz@redhat.com greyerof@redhat.com aabugosh@redhat.com bmandal@redhat.com deliedit@redhat.com jmontesi@redhat.com shmoran@redhat.com speretz@redhat.com mlin@redhat.com'
+      PROJECT_ID: 'CNF'
+    
+    steps:
+      - name: Install the JQ package
+        run: sudo apt-get install jq -y
+
+      - name: Clone the telco-bot repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Clone the jiracrawler repository
+      - name: Checkout jiracrawler
+        uses: actions/checkout@v4
+        with:
+          repository: 'sebrandon1/jiracrawler'
+          path: jiracrawler
+          ref: v0.0.1
+
+      - name: Build the jiracrawler project
+        run: make build
+        working-directory: jiracrawler
+
+      - name: Set the config file via the jiracrawler project
+        run: ./jiracrawler config set -t ${{ secrets.JIRA_PERSONAL_TOKEN }} -s ${{ secrets.JIRA_PERSONAL_EMAIL }}
+        working-directory: jiracrawler
+
+      - name: Run the jiracrawler project for our list of users and collect the JSON output
+        run: ./jiracrawler get assignedissues ${USERS} --projectID ${PROJECT_ID} -o json > ${GITHUB_WORKSPACE}/jira-output-raw.json
+        working-directory: jiracrawler
+
+      # This santiizes the raw JSON output from essentially the entire API response into a readable format
+      - name: Translate the JSON output into a sanitized format
+        run: ./scripts/sanitize-raw-jira-format.sh ${GITHUB_WORKSPACE}/jira-output-raw.json ${GITHUB_WORKSPACE}/jira-output.json
+
+      - name: Print the sanitized JSON output
+        run: cat ${GITHUB_WORKSPACE}/jira-output.json
+
+      - name: Run the script to send the sanitized JSON output to Slack
+        run: ./scripts/send-cnf-team-jira-update.sh ${{ secrets.JIRA_UPDATE_SLACK_WEBHOOK }} ${GITHUB_WORKSPACE}/jira-output.json
