@@ -34,7 +34,7 @@ jobs:
         with:
           repository: 'sebrandon1/jiracrawler'
           path: jiracrawler
-          ref: v0.0.1
+          ref: v0.0.3
 
       - name: Build the jiracrawler project
         run: make build
