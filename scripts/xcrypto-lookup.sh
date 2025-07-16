@@ -1,5 +1,59 @@
 #!/bin/bash
 
+#===============================================================================
+# GOLANG.ORG/X/CRYPTO USAGE SCANNER
+#===============================================================================
+#
+# DESCRIPTION:
+#   This script scans GitHub organizations for repositories that directly use
+#   the golang.org/x/crypto package. It identifies Go projects with direct
+#   dependencies (excluding indirect dependencies) by examining go.mod files.
+#
+# PREREQUISITES:
+#   1. GitHub CLI (gh) must be installed on your system
+#      - Install: https://cli.github.com/
+#      - macOS: brew install gh
+#      - Linux: See https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+#   2. GitHub CLI must be authenticated with sufficient permissions
+#      - Run: gh auth login
+#      - Requires read access to repositories in target organizations
+#   3. curl must be available (typically pre-installed on most systems)
+#   4. Internet connection to fetch repository data and go.mod files
+#
+# USAGE:
+#   ./xcrypto-lookup.sh
+#
+# CONFIGURATION:
+#   You can customize which organizations to scan by editing the ORGS array
+#   below (line ~45). Add or remove organization names as needed:
+#
+#   ORGS=("your-org" "another-org" "third-org")
+#
+# OUTPUT:
+#   The script provides:
+#   - Real-time progress as it scans each repository
+#   - Per-organization summary of findings
+#   - Final summary with total counts and usage percentage
+#   - Color-coded output for easy reading
+#
+# LIMITATIONS:
+#   - Limited to 1000 repositories per organization (configurable via LIMIT)
+#   - Only detects direct dependencies, not transitive usage
+#   - Requires public access to go.mod files or appropriate permissions
+#===============================================================================
+
+# Check if GitHub CLI is installed
+echo "🔧 Checking GitHub CLI installation..."
+if ! command -v gh &>/dev/null; then
+	echo -e "\033[0;31m❌ ERROR: GitHub CLI (gh) is not installed!\033[0m"
+	echo -e "\033[0;33m💡 Please install it first:\033[0m"
+	echo -e "\033[0;33m   macOS: brew install gh\033[0m"
+	echo -e "\033[0;33m   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md\033[0m"
+	echo -e "\033[0;33m   Or visit: https://cli.github.com/\033[0m"
+	exit 1
+fi
+echo -e "\033[0;32m✅ GitHub CLI is installed\033[0m"
+
 # Check if GitHub CLI is logged in
 echo "🔒 Checking GitHub CLI authentication..."
 if ! gh auth status &>/dev/null; then
