@@ -18,7 +18,7 @@ jobs:
         run: sudo apt-get install jq -y
 
       - name: Clone the telco-bot repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -27,7 +27,7 @@ jobs:
 
       # Clone the go-dci repository
       - name: Checkout go-dci
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: 'sebrandon1/go-dci'
           path: go-dci
