@@ -29,6 +29,12 @@
 #
 #   ORGS=("your-org" "another-org" "third-org")
 #
+#   You can also specify individual repositories in xcrypto-repo-list.txt
+#   (one per line). Supported formats:
+#     - owner/repo
+#     - github.com/owner/repo
+#     - https://github.com/owner/repo
+#
 # OUTPUT:
 #   The script provides:
 #   - Real-time progress as it scans each repository
@@ -136,6 +142,75 @@ for ORG_NAME in "${ORGS[@]}"; do
 	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 	echo
 done
+
+# Scan individual repositories from xcrypto-repo-list.txt if it exists
+REPO_LIST_FILE="xcrypto-repo-list.txt"
+if [ -f "$REPO_LIST_FILE" ]; then
+	echo -e "${YELLOW}${BOLD}👉 Individual Repositories from ${REPO_LIST_FILE}${RESET}"
+
+	# Track results for individual repos
+	INDIVIDUAL_FOUND=0
+	INDIVIDUAL_COUNT=0
+
+	# Use a separate file to store results
+	temp_results=$(mktemp)
+
+	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
+		# Skip empty lines and comments (# or //)
+		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
+
+		# Normalize repo format: extract owner/repo from various formats
+		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+
+		# Skip if still empty after normalization
+		[[ -z "$repo" ]] && continue
+
+		INDIVIDUAL_COUNT=$((INDIVIDUAL_COUNT + 1))
+
+		# Get default branch for the repo
+		echo -ne "   📂 ${repo}... "
+		branch=$(gh repo view "$repo" --json defaultBranchRef -q '.defaultBranchRef.name' 2>/dev/null)
+
+		if [[ $? -ne 0 || -z "$branch" ]]; then
+			echo -e "${RED}✗ Failed to fetch repo info${RESET}"
+			continue
+		fi
+
+		echo -ne "on branch ${branch}... "
+
+		# Fetch go.mod raw content from default branch
+		raw_url="https://raw.githubusercontent.com/$repo/$branch/go.mod"
+		go_mod=$(curl -s -f "$raw_url")
+
+		if [[ $? -ne 0 ]]; then
+			echo -e "${YELLOW}no go.mod${RESET}"
+			continue
+		fi
+
+		# Check for direct dependency (exclude // indirect)
+		if echo "$go_mod" | grep -E '^require[[:space:]]+golang.org/x/crypto' | grep -vq '// indirect'; then
+			echo -e "${GREEN}✓ USES crypto directly${RESET}"
+			echo "found" >>"$temp_results"
+		else
+			echo -e "${RED}✗ NO direct usage${RESET}"
+		fi
+	done <"$REPO_LIST_FILE"
+
+	# Count the results
+	if [ -f "$temp_results" ]; then
+		INDIVIDUAL_FOUND=$(grep -c "found" "$temp_results")
+		FOUND_COUNT=$((FOUND_COUNT + INDIVIDUAL_FOUND))
+		TOTAL_REPOS=$((TOTAL_REPOS + INDIVIDUAL_COUNT))
+		rm "$temp_results"
+	fi
+
+	# Summary for individual repositories
+	echo
+	echo -e "${YELLOW}${BOLD}📊 Summary for Individual Repositories:${RESET}"
+	echo -e "   ${GREEN}${INDIVIDUAL_FOUND}${RESET} repositories with direct golang.org/x/crypto usage (out of ${INDIVIDUAL_COUNT} scanned)"
+	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
+	echo
+fi
 
 # Final summary
 echo -e "${BOLD}${BLUE}📈 FINAL RESULTS:${RESET}"

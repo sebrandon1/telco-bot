@@ -1,0 +1,4 @@
+// Add any repositories you want to test below (one per line, formats: owner/repo, github.com/owner/repo, or full GitHub URL)
+github.com/openshift-kni/numaresources-operator
+github.com/openshift-kni/scheduler-plugins
+github.com/stolostron/siteconfig
