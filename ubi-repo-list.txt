@@ -1,0 +1,9 @@
+# Additional repositories to scan for UBI image usage
+# Add one repository per line in any of these formats:
+#   - owner/repo
+#   - github.com/owner/repo
+#   - https://github.com/owner/repo
+#
+# Lines starting with # or // are treated as comments and ignored
+# Empty lines are also ignored
+
