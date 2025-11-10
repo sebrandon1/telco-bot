@@ -1,0 +1,18 @@
+# Go Version Checker - Individual Repository List
+#
+# Add repositories to scan in addition to the organizations configured in the script.
+# One repository per line. Supported formats:
+#   - owner/repo
+#   - github.com/owner/repo
+#   - https://github.com/owner/repo
+#
+# Lines starting with # or // are treated as comments and ignored.
+# Empty lines are also ignored.
+#
+# Examples:
+# kubernetes/kubernetes
+# golang/go
+# https://github.com/prometheus/prometheus
+
+# Add your repositories below:
+
