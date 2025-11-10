@@ -34,5 +34,5 @@ jobs:
       - name: Run the go-version-checker script
         run: |
           echo "Running go-version-checker script"
-          ./scripts/go-version-checker.sh
+          ./scripts/go-version-checker.sh --create-issues
 
