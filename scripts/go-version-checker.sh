@@ -187,7 +187,8 @@ fi
 
 # Extract stable versions (everything before "Archived versions" section)
 # Versions are in format go1.XX.YY
-STABLE_VERSIONS=$(echo "$GO_DL_PAGE" | sed -n '0,/[Aa]rchived [Vv]ersions/p' | grep -oE 'go1\.[0-9]+(\.[0-9]+)?' | sort -u)
+# Sort by version number (not alphabetically) using sort -V
+STABLE_VERSIONS=$(echo "$GO_DL_PAGE" | sed -n '0,/[Aa]rchived [Vv]ersions/p' | grep -oE 'go1\.[0-9]+(\.[0-9]+)?' | sort -V -u)
 STABLE_COUNT=$(echo "$STABLE_VERSIONS" | wc -l | tr -d ' ')
 
 # Extract major versions (e.g., go1.25 from go1.25.4) for default checking
@@ -246,6 +247,109 @@ extract_go_version() {
 	echo "$go_mod" | grep -E '^go[[:space:]]+[0-9]+\.[0-9]+' | awk '{print $2}' | head -1
 }
 
+# Function to compare two Go versions (returns 0 if v1 < v2, 1 if v1 >= v2)
+# Versions should be in format like "1.22.0" or "go1.22.0"
+version_lt() {
+	local v1=$1
+	local v2=$2
+	# Remove 'go' prefix if present
+	v1=$(echo "$v1" | sed 's/^go//')
+	v2=$(echo "$v2" | sed 's/^go//')
+	# Compare using sort -V (version sort)
+	if [ "$(printf '%s\n' "$v1" "$v2" | sort -V | head -1)" = "$v1" ] && [ "$v1" != "$v2" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# Function to find the lowest stable version that's greater than the current version
+# Returns the version string (without 'go' prefix) or empty if none found
+find_lowest_stable_above() {
+	local current_version=$1
+	# Remove 'go' prefix if present
+	current_version=$(echo "$current_version" | sed 's/^go//')
+
+	local lowest_stable=""
+
+	# Iterate through stable versions and find the first one greater than current
+	while IFS= read -r stable_version; do
+		# Remove 'go' prefix
+		stable_clean=$(echo "$stable_version" | sed 's/^go//')
+
+		# Check if this stable version is greater than current
+		if version_lt "$current_version" "$stable_clean"; then
+			lowest_stable="$stable_clean"
+			break
+		fi
+	done <<<"$STABLE_VERSIONS"
+
+	# If not checking minor versions, return only major version
+	if [ "$CHECK_MINOR" = false ] && [ -n "$lowest_stable" ]; then
+		lowest_stable=$(echo "$lowest_stable" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+	fi
+
+	echo "$lowest_stable"
+}
+
+# Function to check if an issue has a "Closed" comment
+# Returns 0 (true) if "Closed" comment exists, 1 (false) otherwise
+has_closed_comment() {
+	local repo=$1
+	local issue_number=$2
+
+	# Get all comments for the issue
+	local comments=$(gh issue view "$issue_number" --repo "$repo" --json comments --jq '.comments[].body' 2>/dev/null)
+
+	if [ -z "$comments" ]; then
+		return 1
+	fi
+
+	# Check if any comment contains just "Closed" (case-insensitive, trimmed)
+	while IFS= read -r comment; do
+		# Trim whitespace and check if comment is exactly "Closed" (case-insensitive)
+		trimmed=$(echo "$comment" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+		if [ "$(echo "$trimmed" | tr '[:upper:]' '[:lower:]')" = "closed" ]; then
+			return 0
+		fi
+	done <<<"$comments"
+	return 1
+}
+
+# Function to check if an issue has comments from someone other than the creator
+# Returns 0 (true) if commented by others, 1 (false) otherwise
+has_other_comments() {
+	local repo=$1
+	local issue_number=$2
+
+	# Get issue creator (silence errors)
+	local creator
+	creator=$(gh issue view "$issue_number" --repo "$repo" --json author --jq '.author.login' 2>/dev/null || echo "")
+
+	if [ -z "$creator" ]; then
+		return 1
+	fi
+
+	# Get all comments and check if any are from someone other than the creator
+	# Use proper jq escaping for the creator variable
+	# Check if there are any comments at all first, then filter by author
+	local comment_count
+	comment_count=$(gh issue view "$issue_number" --repo "$repo" --json comments --jq '.comments | length' 2>/dev/null || echo "0")
+
+	if [ "$comment_count" = "0" ] || [ -z "$comment_count" ]; then
+		return 1
+	fi
+
+	# Now check if any comments are from someone other than creator
+	local other_comments
+	other_comments=$(gh issue view "$issue_number" --repo "$repo" --json comments --jq --arg creator "$creator" '[.comments[] | select(.author.login != $creator)] | length' 2>/dev/null || echo "0")
+
+	if [ -n "$other_comments" ] && [ "$other_comments" != "0" ] && [ "$other_comments" -gt 0 ]; then
+		return 0
+	fi
+	return 1
+}
+
 # Function to create or update a GitHub issue for outdated Go version
 # Returns the issue number via echo
 create_github_issue() {
@@ -255,16 +359,20 @@ create_github_issue() {
 
 	# Remove 'go' prefix from versions for display (go1.19 -> 1.19)
 	local current_display="${current_version#go}"
-	local latest_display="${latest_stable#go}"
 
-	# If not checking minor versions, show only major version in title
-	local latest_title_display="$latest_display"
-	if [ "$CHECK_MINOR" = false ]; then
-		# Extract major version (e.g., 1.25 from 1.25.4)
-		latest_title_display=$(echo "$latest_display" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+	# Find the lowest stable version above the current version
+	local recommended_version
+	recommended_version=$(find_lowest_stable_above "$current_version")
+
+	# Fallback to latest stable if no recommended version found (shouldn't happen, but safety check)
+	if [ -z "$recommended_version" ]; then
+		recommended_version="${latest_stable#go}"
+		if [ "$CHECK_MINOR" = false ]; then
+			recommended_version=$(echo "$recommended_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+		fi
 	fi
 
-	local issue_title="Update Go version from ${current_display} to ${latest_title_display}"
+	local issue_title="Update Go version from ${current_display} to ${recommended_version}"
 
 	# Build Kubernetes version reference
 	local k8s_version_text=""
@@ -283,17 +391,26 @@ create_github_issue() {
 "
 	fi
 
+	# Build recommended action text
+	local recommended_action_text=""
+	if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+		recommended_action_text="Please update the \`go.mod\` file to use a stable version of Go. We recommend using Go \`${OPENSHIFT_K8S_GO_VERSION}\`, which is the version used by OpenShift Kubernetes."
+	else
+		recommended_action_text="Please update the \`go.mod\` file to use a stable version of Go. The recommended minimum stable version is \`${recommended_version}\` (latest stable is \`${latest_stable#go}\`)."
+	fi
+
 	local issue_body="## Go Version Update Recommended
 
 This repository is currently using Go version \`${current_display}\`, which is listed in the archived versions on [go.dev/dl/](https://go.dev/dl/).
 
 ### Current Status
 - **Current Version**: \`${current_version}\`
-- **Latest Stable**: \`${latest_stable}\`
+- **Recommended Version**: \`${recommended_version}\`
+- **Latest Stable**: \`${latest_stable#go}\`
 - **Status**: ⚠️ Outdated (archived)
 ${k8s_version_text}
 ### Recommended Action
-Please update the \`go.mod\` file to use a stable version of Go. The latest stable version is \`${latest_display}\`.
+${recommended_action_text}
 
 ### Resources
 - [Go Downloads](https://go.dev/dl/)
@@ -314,10 +431,14 @@ Please update the \`go.mod\` file to use a stable version of Go. The latest stab
 		echo -ne "      Updating issue #${issue_number}... " >&2
 
 		if gh issue edit "$issue_number" --repo "$repo" --title "$issue_title" --body "$issue_body" &>/dev/null; then
-			# Reopen if closed
+			# Reopen if closed, but only if there's no "Closed" comment
 			if [ "$issue_state" = "CLOSED" ]; then
-				gh issue reopen "$issue_number" --repo "$repo" &>/dev/null
-				echo -e "${GREEN}✓ Updated and reopened${RESET}" >&2
+				if has_closed_comment "$repo" "$issue_number"; then
+					echo -e "${YELLOW}✓ Updated (kept closed - has 'Closed' comment)${RESET}" >&2
+				else
+					gh issue reopen "$issue_number" --repo "$repo" &>/dev/null
+					echo -e "${GREEN}✓ Updated and reopened${RESET}" >&2
+				fi
 			else
 				echo -e "${GREEN}✓ Updated${RESET}" >&2
 			fi
@@ -648,10 +769,11 @@ fi
 if [ "$UPDATE_TRACKING" = true ]; then
 	echo -e "${BLUE}${BOLD}📋 Updating Central Tracking Issue${RESET}"
 	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
+	echo -e "${BLUE}   Building issue body with ${OUTDATED_COUNT} outdated repositories...${RESET}"
 
 	# Build the issue body
 	# Add Kubernetes version references if available
-	local k8s_ref=""
+	k8s_ref=""
 	if [ "$K8S_GO_VERSION" != "unknown" ]; then
 		k8s_ref+="
 **Kubernetes Go Version:** \`${K8S_GO_VERSION}\` ([kubernetes/kubernetes/go.mod](https://github.com/kubernetes/kubernetes/blob/master/go.mod))"
@@ -719,9 +841,43 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 				ISSUE_BODY+="
 
-| Repository | Current Version | Branch | Last Updated | Tracking Issue |
-|------------|----------------|--------|--------------|----------------|
+| Repository | Current Version | Branch | Last Updated | Tracking Issue | Commented |
+|------------|----------------|--------|--------------|----------------|-----------|
 "
+
+				# Count total repos for progress tracking
+				TOTAL_REPOS_TO_CHECK=$(echo "$ORG_REPOS" | wc -l | tr -d ' ')
+				# Count repos that have a tracking issue (6th field is non-empty)
+				REPOS_WITH_ISSUES=$(echo "$ORG_REPOS" | awk -F'|' '$6 != "" && $6 != " " {count++} END {print count+0}')
+
+				# Batch fetch comment status for all issues to avoid multiple API calls
+				COMMENT_CACHE=$(mktemp)
+				if [ "$REPOS_WITH_ISSUES" -gt 0 ]; then
+					echo -e "      ${BLUE}Fetching comment status for ${REPOS_WITH_ISSUES} issues (batch)...${RESET}" >&2
+					# Extract unique repo|issue pairs and fetch them in batches
+					echo "$ORG_REPOS" | awk -F'|' '$6 != "" && $6 != " " {print $2 "|" $6}' | sort -u | while IFS='|' read -r repo issue_num; do
+						# Fetch issue with author and comments in one call, then filter comments by author
+						# Use jq to get creator first, then filter comments
+						issue_json=$(gh issue view "$issue_num" --repo "$repo" --json author,comments 2>/dev/null || echo "")
+						if [ -n "$issue_json" ]; then
+							creator=$(echo "$issue_json" | jq -r '.author.login' 2>/dev/null || echo "")
+							if [ -n "$creator" ] && [ "$creator" != "null" ]; then
+								# Count comments from authors other than creator
+								other_comments=$(echo "$issue_json" | jq --arg creator "$creator" '[.comments[] | select(.author.login != $creator)] | length' 2>/dev/null || echo "0")
+								if [ -n "$other_comments" ] && [ "$other_comments" != "0" ] && [ "$other_comments" -gt 0 ]; then
+									echo "${repo}|${issue_num}|1" >>"$COMMENT_CACHE"
+								else
+									echo "${repo}|${issue_num}|0" >>"$COMMENT_CACHE"
+								fi
+							else
+								echo "${repo}|${issue_num}|0" >>"$COMMENT_CACHE"
+							fi
+						else
+							echo "${repo}|${issue_num}|0" >>"$COMMENT_CACHE"
+						fi
+					done
+					echo -e "      ${GREEN}✓ Comment status fetched${RESET}" >&2
+				fi
 
 				# Sort by last commit date (most recent first) and add each repo to the table
 				echo "$ORG_REPOS" | sort -t'|' -k5 -r | while IFS='|' read -r org repo version branch last_commit tracking_issue; do
@@ -741,11 +897,22 @@ if [ "$UPDATE_TRACKING" = true ]; then
 					# Add tracking issue link if available
 					if [ -n "$tracking_issue" ]; then
 						tracking_issue_link="[#${tracking_issue}](https://github.com/${repo}/issues/${tracking_issue})"
+						# Check cached comment status
+						cached_status=$(grep "^${repo}|${tracking_issue}|" "$COMMENT_CACHE" 2>/dev/null | cut -d'|' -f3 || echo "0")
+						if [ "$cached_status" = "1" ]; then
+							commented_mark="✓"
+						else
+							commented_mark="—"
+						fi
 					else
 						tracking_issue_link="—"
+						commented_mark="—"
 					fi
-					echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${version_display}\` | \`${branch}\` | ${last_commit_display} | ${tracking_issue_link} |"
+					echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${version_display}\` | \`${branch}\` | ${last_commit_display} | ${tracking_issue_link} | ${commented_mark} |"
 				done >>"${ORG_DATA_FILE}.table"
+
+				# Clean up cache file
+				rm -f "$COMMENT_CACHE"
 
 				ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")
 
@@ -774,6 +941,7 @@ All scanned Go repositories are using up-to-date Go versions. Great work! 🎉
 *This issue is automatically updated by the [go-version-checker.sh](https://github.com/${TRACKING_REPO}/blob/main/scripts/go-version-checker.sh) script.*"
 
 	# Check if tracking issue exists
+	echo -e "${BLUE}   Issue body built successfully${RESET}"
 	echo -ne "   Checking for existing tracking issue... "
 	EXISTING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title,state --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
 
