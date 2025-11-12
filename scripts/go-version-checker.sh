@@ -29,7 +29,7 @@
 #   --check-minor      Check patch versions too (e.g., flag 1.25.1 when 1.25.4 is latest)
 #                      By default, only major versions are checked (e.g., 1.25 vs 1.24)
 #   --no-tracking      Skip updating the central tracking issue in telco-bot repo
-#   --clear-cache      Clear the cache of non-Go repositories and rescan everything
+#   --clear-cache      Clear all caches (non-Go repos and forks) and rescan everything
 #   --help             Show this help message
 #
 # TRACKING ISSUE:
@@ -49,6 +49,9 @@
 #     - owner/repo
 #     - github.com/owner/repo
 #     - https://github.com/owner/repo
+#
+#   To exclude specific repositories from scanning, add them to
+#   go-version-repo-blocklist.txt using the same format.
 #
 # OUTPUT:
 #   The script provides:
@@ -148,14 +151,15 @@ RESET="\033[0m"
 TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking Out of Date Golang Versions"
 
-# Cache file for non-Go repositories
+# Cache files
 CACHE_FILE=".go-version-checker.cache"
+FORK_CACHE_FILE=".go-version-checker-forks.cache"
 
 # Clear cache if requested
 if [ "$CLEAR_CACHE" = true ]; then
-	echo -e "${YELLOW}🗑️  Clearing cache...${RESET}"
-	rm -f "$CACHE_FILE"
-	echo -e "${GREEN}✅ Cache cleared${RESET}"
+	echo -e "${YELLOW}🗑️  Clearing caches...${RESET}"
+	rm -f "$CACHE_FILE" "$FORK_CACHE_FILE"
+	echo -e "${GREEN}✅ Caches cleared${RESET}"
 	echo
 fi
 
@@ -163,9 +167,39 @@ fi
 if [ -f "$CACHE_FILE" ]; then
 	NON_GO_REPOS=$(cat "$CACHE_FILE")
 	CACHE_SIZE=$(echo "$NON_GO_REPOS" | wc -l | tr -d ' ')
-	echo -e "${BLUE}📦 Loaded cache: ${CACHE_SIZE} known non-Go repositories${RESET}"
+	echo -e "${BLUE}📦 Loaded non-Go repo cache: ${CACHE_SIZE} repositories${RESET}"
 else
 	NON_GO_REPOS=""
+fi
+
+# Load cache of fork repos
+if [ -f "$FORK_CACHE_FILE" ]; then
+	FORK_REPOS=$(cat "$FORK_CACHE_FILE")
+	FORK_CACHE_SIZE=$(echo "$FORK_REPOS" | wc -l | tr -d ' ')
+	echo -e "${BLUE}🍴 Loaded fork cache: ${FORK_CACHE_SIZE} repositories${RESET}"
+else
+	FORK_REPOS=""
+fi
+
+# Load blocklist of repos to exclude
+BLOCKLIST_FILE="scripts/go-version-repo-blocklist.txt"
+BLOCKLIST=""
+if [ -f "$BLOCKLIST_FILE" ]; then
+	# Read and normalize blocklist entries
+	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
+		# Skip empty lines and comments
+		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
+		# Normalize repo format
+		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		[[ -z "$repo" ]] && continue
+		BLOCKLIST="${BLOCKLIST}${repo}"$'\n'
+	done <"$BLOCKLIST_FILE"
+	BLOCKLIST_SIZE=$(echo "$BLOCKLIST" | grep -c '^' 2>/dev/null || echo "0")
+	if [ "$BLOCKLIST_SIZE" -gt 0 ]; then
+		echo -e "${YELLOW}🚫 Loaded blocklist: ${BLOCKLIST_SIZE} repositories will be excluded${RESET}"
+	fi
+else
+	echo -e "${BLUE}📝 No blocklist found (${BLOCKLIST_FILE})${RESET}"
 fi
 
 # Temporary files to store results
@@ -174,6 +208,7 @@ OUTDATED_REPOS_FILE=$(mktemp)
 ORG_DATA_FILE=$(mktemp)
 # Temporary cache updates
 CACHE_UPDATES=$(mktemp)
+FORK_CACHE_UPDATES=$(mktemp)
 
 # Fetch stable and archived versions from go.dev/dl/
 echo -e "${BLUE}${BOLD}📡 Fetching Go version information from go.dev/dl/${RESET}"
@@ -491,9 +526,9 @@ LATEST_STABLE=$(echo "$STABLE_VERSIONS" | tail -1 | sed 's/^go//')
 for ORG_NAME in "${ORGS[@]}"; do
 	echo -e "${YELLOW}${BOLD}👉 Organization: ${ORG_NAME}${RESET}"
 
-	# Get all repos first
+	# Get all repos first (including fork status)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
-	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived -q '.[] | select(.isArchived == false) | .nameWithOwner + " " + .defaultBranchRef.name')
+	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,isFork -q '.[] | select(.isArchived == false) | .nameWithOwner + " " + .defaultBranchRef.name + " " + (.isFork | tostring)')
 	REPO_COUNT=$(echo "$REPOS" | wc -l | tr -d ' ')
 	TOTAL_REPOS=$((TOTAL_REPOS + REPO_COUNT))
 
@@ -504,12 +539,68 @@ for ORG_NAME in "${ORGS[@]}"; do
 	ORG_OUTDATED=0
 	ORG_GO_REPOS=0
 
-	while read -r repo branch; do
+	while read -r repo branch is_fork; do
 		# Skip empty lines
 		[[ -z "$repo" ]] && continue
 
 		# Show a simple progress indicator
 		echo -ne "   📂 ${repo} on branch ${branch}... "
+
+		# Check fork cache first
+		if echo "$FORK_REPOS" | grep -q "^${repo}$"; then
+			echo -e "${YELLOW}skipped (fork - cached)${RESET}"
+			# Close any existing issues on forks
+			if [ "$CREATE_ISSUES" = true ]; then
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
+			fi
+			continue
+		fi
+
+		# Skip forks detected from API
+		if [ "$is_fork" = "true" ]; then
+			echo -e "${YELLOW}skipped (fork)${RESET}"
+			# Add to fork cache
+			echo "$repo" >>"$FORK_CACHE_UPDATES"
+			# Close any existing issues on forks
+			if [ "$CREATE_ISSUES" = true ]; then
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
+			fi
+			continue
+		fi
+
+		# Check blocklist
+		if [ -n "$BLOCKLIST" ] && echo "$BLOCKLIST" | grep -q "^${repo}$"; then
+			echo -e "${YELLOW}skipped (blocklisted)${RESET}"
+			# Close any existing issues on blocklisted repos
+			if [ "$CREATE_ISSUES" = true ]; then
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on blocklisted repo... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
+			fi
+			continue
+		fi
 
 		# Check cache first
 		if echo "$NON_GO_REPOS" | grep -q "^${repo}$"; then
@@ -556,8 +647,8 @@ for ORG_NAME in "${ORGS[@]}"; do
 			ORG_OUTDATED=$((ORG_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
 
-			# Fetch last commit date for sorting
-			last_commit=$(gh repo view "$repo" --json pushedAt -q '.pushedAt' 2>/dev/null || echo "unknown")
+			# Fetch last commit date from default branch (not pushedAt which includes tags/branches)
+			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
 			# Store for report (global and org-specific with last commit date)
 			# Format: repo|version|branch|tracking_issue_number (tracking_issue_number added later if --create-issues is used)
@@ -581,7 +672,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 done
 
 # Scan individual repositories from go-version-repo-list.txt if it exists
-REPO_LIST_FILE="go-version-repo-list.txt"
+REPO_LIST_FILE="scripts/go-version-repo-list.txt"
 if [ -f "$REPO_LIST_FILE" ]; then
 	echo -e "${YELLOW}${BOLD}👉 Individual Repositories from ${REPO_LIST_FILE}${RESET}"
 
@@ -599,19 +690,78 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		# Skip if still empty after normalization
 		[[ -z "$repo" ]] && continue
 
-		# Get default branch for the repo
+		# Get default branch and fork status for the repo
 		echo -ne "   📂 ${repo}... "
 
-		# Check cache first
+		# Check fork cache first
+		if echo "$FORK_REPOS" | grep -q "^${repo}$"; then
+			echo -e "${YELLOW}skipped (fork - cached)${RESET}"
+			# Close any existing issues on forks
+			if [ "$CREATE_ISSUES" = true ]; then
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
+			fi
+			continue
+		fi
+
+		# Check non-Go cache
 		if echo "$NON_GO_REPOS" | grep -q "^${repo}$"; then
 			echo -e "${YELLOW}no go.mod (cached)${RESET}"
 			continue
 		fi
 
-		branch=$(gh repo view "$repo" --json defaultBranchRef -q '.defaultBranchRef.name' 2>/dev/null)
+		repo_info=$(gh repo view "$repo" --json defaultBranchRef,isFork 2>/dev/null)
 
-		if [[ $? -ne 0 || -z "$branch" ]]; then
+		if [[ $? -ne 0 || -z "$repo_info" ]]; then
 			echo -e "${RED}✗ Failed to fetch repo info${RESET}"
+			continue
+		fi
+
+		branch=$(echo "$repo_info" | jq -r '.defaultBranchRef.name')
+		is_fork=$(echo "$repo_info" | jq -r '.isFork')
+
+		# Skip forks detected from API
+		if [ "$is_fork" = "true" ]; then
+			echo -e "${YELLOW}skipped (fork)${RESET}"
+			# Add to fork cache
+			echo "$repo" >>"$FORK_CACHE_UPDATES"
+			# Close any existing issues on forks
+			if [ "$CREATE_ISSUES" = true ]; then
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
+			fi
+			continue
+		fi
+
+		# Check blocklist
+		if [ -n "$BLOCKLIST" ] && echo "$BLOCKLIST" | grep -q "^${repo}$"; then
+			echo -e "${YELLOW}skipped (blocklisted)${RESET}"
+			# Close any existing issues on blocklisted repos
+			if [ "$CREATE_ISSUES" = true ]; then
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on blocklisted repo... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
+			fi
 			continue
 		fi
 
@@ -657,8 +807,8 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
 			TOTAL_REPOS=$((TOTAL_REPOS + 1))
 
-			# Fetch last commit date for sorting
-			last_commit=$(gh repo view "$repo" --json pushedAt -q '.pushedAt' 2>/dev/null || echo "unknown")
+			# Fetch last commit date from default branch (not pushedAt which includes tags/branches)
+			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
 			# Store for report (global and org-specific with last commit date)
 			echo "$repo|$go_version|$branch" >>"$OUTDATED_REPOS_FILE"
@@ -723,14 +873,33 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 		# Calculate cutoff date for "last year" (365 days ago)
 		ONE_YEAR_AGO=$(date -u -v-365d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "365 days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
 
+		if [ -z "$ONE_YEAR_AGO" ]; then
+			echo -e "${RED}⚠️  Warning: Unable to calculate one year ago date. All outdated repos will receive issues.${RESET}" >&2
+		else
+			echo -e "${BLUE}   Activity cutoff date: ${ONE_YEAR_AGO:0:10} (repos inactive since then will be skipped)${RESET}" >&2
+		fi
+
 		# Create a temporary file to store repo -> issue number mappings
 		ISSUE_MAPPING=$(mktemp)
 
 		# Use ORG_DATA_FILE to access last_commit timestamps
 		sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+			# Debug: Show what we're comparing
+			# echo -e "      ${BLUE}[DEBUG] ${repo}: last_commit='${last_commit}' vs ONE_YEAR_AGO='${ONE_YEAR_AGO}'${RESET}" >&2
+
 			# Only create issues for repos updated in the last year
 			if [ -n "$ONE_YEAR_AGO" ] && [ "$last_commit" != "unknown" ] && [ "$last_commit" \< "$ONE_YEAR_AGO" ]; then
 				echo -e "      ${YELLOW}⏩ Skipping ${repo} (last updated: ${last_commit:0:10}, inactive for >1 year)${RESET}" >&2
+				# Close any existing issues on inactive repos
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				if [ -n "$existing_issue" ]; then
+					echo -ne "      Closing issue #${existing_issue} on inactive repo... " >&2
+					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
+						echo -e "${GREEN}✓ Closed${RESET}" >&2
+					else
+						echo -e "${RED}✗ Failed${RESET}" >&2
+					fi
+				fi
 				continue
 			fi
 
@@ -978,15 +1147,22 @@ All scanned Go repositories are using up-to-date Go versions. Great work! 🎉
 	echo
 fi
 
-# Save updated cache
+# Save updated caches
 if [ -f "$CACHE_UPDATES" ] && [ -s "$CACHE_UPDATES" ]; then
 	cat "$CACHE_UPDATES" "$CACHE_FILE" 2>/dev/null | sort -u >"${CACHE_FILE}.tmp"
 	mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
 	NEW_CACHE_COUNT=$(wc -l <"$CACHE_UPDATES" | tr -d ' ')
-	echo -e "${BLUE}💾 Cache updated: Added ${NEW_CACHE_COUNT} new non-Go repositories${RESET}"
+	echo -e "${BLUE}💾 Non-Go repo cache updated: Added ${NEW_CACHE_COUNT} repositories${RESET}"
+fi
+
+if [ -f "$FORK_CACHE_UPDATES" ] && [ -s "$FORK_CACHE_UPDATES" ]; then
+	cat "$FORK_CACHE_UPDATES" "$FORK_CACHE_FILE" 2>/dev/null | sort -u >"${FORK_CACHE_FILE}.tmp"
+	mv "${FORK_CACHE_FILE}.tmp" "$FORK_CACHE_FILE"
+	NEW_FORK_COUNT=$(wc -l <"$FORK_CACHE_UPDATES" | tr -d ' ')
+	echo -e "${BLUE}🍴 Fork cache updated: Added ${NEW_FORK_COUNT} repositories${RESET}"
 fi
 
 # Cleanup
-rm -f "$OUTDATED_REPOS_FILE" "$ORG_DATA_FILE" "$CACHE_UPDATES"
+rm -f "$OUTDATED_REPOS_FILE" "$ORG_DATA_FILE" "$CACHE_UPDATES" "$FORK_CACHE_UPDATES"
 
 echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"

@@ -1,2 +1,4 @@
 dci-output.json
 .go-version-checker.cache
+.go-version-checker-forks.cache
+.go-version-checker-abandoned.cache
