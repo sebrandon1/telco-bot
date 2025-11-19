@@ -255,6 +255,23 @@ else
 	echo -e "${YELLOW}⚠️  Unable to fetch OpenShift Kubernetes Go version${RESET}"
 	OPENSHIFT_K8S_GO_VERSION="unknown"
 fi
+
+# If both Kubernetes version fetches failed, GitHub is likely unavailable
+if [ "$K8S_GO_VERSION" = "unknown" ] && [ "$OPENSHIFT_K8S_GO_VERSION" = "unknown" ]; then
+	echo
+	echo -e "${RED}${BOLD}❌ ERROR: Unable to fetch data from GitHub${RESET}"
+	echo -e "${RED}─────────────────────────────────────────────────────${RESET}"
+	echo -e "${YELLOW}This script requires access to GitHub's raw content API.${RESET}"
+	echo -e "${YELLOW}Possible causes:${RESET}"
+	echo -e "${YELLOW}  • GitHub is experiencing an outage${RESET}"
+	echo -e "${YELLOW}  • Your internet connection is down${RESET}"
+	echo -e "${YELLOW}  • GitHub's raw content API is blocked${RESET}"
+	echo -e "${YELLOW}  • Rate limiting is in effect${RESET}"
+	echo
+	echo -e "${BLUE}Please check GitHub's status at: https://www.githubstatus.com/${RESET}"
+	echo -e "${BLUE}Then try running the script again once GitHub is accessible.${RESET}"
+	exit 1
+fi
 echo
 
 # Function to check if a version is stable
@@ -864,9 +881,53 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 		echo
 	done
 
+	# Check for existing issues and update ORG_DATA_FILE with issue numbers
+	# This runs regardless of --create-issues flag
+	echo -e "${BLUE}${BOLD}🔍 Checking for Existing GitHub Issues${RESET}"
+	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
+	echo
+
+	# Create a temporary file to store repo -> issue number mappings
+	ISSUE_MAPPING=$(mktemp)
+
+	# Check each outdated repo for existing issues
+	sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+		echo -ne "   📂 Checking ${repo}... " >&2
+
+		# Search for existing "Update Go version" issues (both open and closed)
+		existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state all --json number,title,state --jq ".[] | select(.title | test(\"Update Go version from\")) | \"\(.number)|\(.state)\"" | head -1)
+
+		if [ -n "$existing_issue" ]; then
+			issue_number=$(echo "$existing_issue" | cut -d'|' -f1)
+			issue_state=$(echo "$existing_issue" | cut -d'|' -f2)
+			echo -e "${GREEN}found issue #${issue_number} (${issue_state})${RESET}" >&2
+			echo "$repo|$issue_number" >>"$ISSUE_MAPPING"
+		else
+			echo -e "${YELLOW}no existing issue${RESET}" >&2
+		fi
+	done
+
+	# Update ORG_DATA_FILE with issue numbers
+	if [ -f "$ISSUE_MAPPING" ] && [ -s "$ISSUE_MAPPING" ]; then
+		ORG_DATA_TEMP=$(mktemp)
+		while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+			# Look up issue number for this repo
+			issue_num=$(grep "^${repo}|" "$ISSUE_MAPPING" | cut -d'|' -f2)
+			if [ -n "$issue_num" ]; then
+				echo "$org|$repo|$version|$branch|$last_commit|$issue_num" >>"$ORG_DATA_TEMP"
+			else
+				echo "$org|$repo|$version|$branch|$last_commit|$tracking_issue" >>"$ORG_DATA_TEMP"
+			fi
+		done <"$ORG_DATA_FILE"
+		mv "$ORG_DATA_TEMP" "$ORG_DATA_FILE"
+		rm -f "$ISSUE_MAPPING"
+	fi
+
+	echo
+
 	# Create GitHub issues if requested
 	if [ "$CREATE_ISSUES" = true ]; then
-		echo -e "${YELLOW}${BOLD}📝 Creating GitHub Issues for Outdated Repositories${RESET}"
+		echo -e "${YELLOW}${BOLD}📝 Creating/Updating GitHub Issues for Outdated Repositories${RESET}"
 		echo -e "${YELLOW}─────────────────────────────────────────────────────${RESET}"
 		echo
 
