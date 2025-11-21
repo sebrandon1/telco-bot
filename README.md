@@ -11,6 +11,7 @@ Telco-Bot is a collection of automation tools and scripts designed to help the R
 ### Repository Scanning & Monitoring
 - **Go Version Tracking**: Automatically scans repositories for outdated Go versions and creates/updates GitHub issues
 - **Dependency Monitoring**: Tracks usage of deprecated packages (golang/mock) and security-sensitive dependencies (x/crypto)
+- **Linter Version Tracking**: Monitors golangci-lint versions across repositories to ensure teams use the latest linters
 - **Container Image Scanning**: Identifies UBI (Universal Base Image) versions across Dockerfiles
 - **Repository Health**: Identifies abandoned repositories and forks to prevent unnecessary maintenance
 
@@ -47,6 +48,9 @@ All automation scripts are located in the `scripts/` directory. Each script incl
 # Example: Scan for deprecated golang/mock usage
 ./scripts/gomock-lookup.sh
 
+# Example: Check for outdated golangci-lint versions
+./scripts/golangci-lint-checker.sh
+
 # Example: Find UBI7 usage across organizations
 ./scripts/ubi-lookup.sh --version ubi7
 ```
@@ -62,6 +66,7 @@ All automation scripts are located in the `scripts/` directory. Each script incl
 |--------|---------|
 | `go-version-checker.sh` | Scan for outdated Go versions and create tracking issues |
 | `gomock-lookup.sh` | Find repositories using deprecated golang/mock package |
+| `golangci-lint-checker.sh` | Scan for outdated golangci-lint versions across organizations |
 | `xcrypto-lookup.sh` | Identify golang.org/x/crypto usage |
 | `ubi-lookup.sh` | Scan for specific UBI image versions in Dockerfiles |
 | `find-downstream-repos.sh` | Identify downstream forks and mirrors |

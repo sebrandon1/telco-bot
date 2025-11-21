@@ -1,0 +1,25 @@
+# GolangCI-Lint Repository Blocklist
+#
+# This file contains a list of repositories to exclude from golangci-lint
+# version checking. Repositories listed here will be skipped during scanning.
+#
+# Format: One repository per line
+# Supported formats:
+#   - owner/repo
+#   - github.com/owner/repo
+#   - https://github.com/owner/repo
+#
+# Lines starting with # or // are treated as comments and ignored.
+# Empty lines are also ignored.
+#
+# Common reasons to blocklist a repository:
+#   - Repository intentionally uses an older version
+#   - Repository is in maintenance mode
+#   - Repository has special version requirements
+#   - Known false positives
+#
+# Example:
+# example-org/legacy-repo
+# github.com/another-org/special-project
+# https://github.com/third-org/archived-tool
+

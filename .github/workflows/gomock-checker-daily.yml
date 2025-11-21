@@ -1,0 +1,48 @@
+name: GoMock Usage Checker - Daily Update
+
+on:
+  schedule:
+    # Run daily at 7:00 AM UTC (2:00 AM EST / 3:00 AM EDT)
+    - cron: '0 7 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-gomock-usage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      
+      - name: Run GoMock usage checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Make script executable
+          chmod +x scripts/gomock-lookup.sh
+          
+          # Run the script to update tracking issue
+          ./scripts/gomock-lookup.sh
+      
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gomock-usage-report
+          path: |
+            gomock-usage-report.md
+            .go-version-checker-*.cache
+            .gomock-lookup-*.cache
+          retention-days: 7
+

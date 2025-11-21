@@ -7,6 +7,7 @@ This directory contains automation scripts for monitoring and managing GitHub re
 - [Repository Scanning Scripts](#repository-scanning-scripts)
   - [go-version-checker.sh](#go-version-checkersh)
   - [gomock-lookup.sh](#gomock-lookupsh)
+  - [golangci-lint-checker.sh](#golangci-lint-checkersh)
   - [xcrypto-lookup.sh](#xcrypto-lookupsh)
   - [ubi-lookup.sh](#ubi-lookupsh)
   - [find-downstream-repos.sh](#find-downstream-repossh)
@@ -106,6 +107,70 @@ This directory contains automation scripts for monitoring and managing GitHub re
 
 **Migration Recommendation**:
 The script recommends migrating to `go.uber.org/mock`, the maintained fork of golang/mock.
+
+---
+
+### golangci-lint-checker.sh
+
+**Purpose**: Scans GitHub organizations for repositories using outdated versions of golangci-lint, a popular Go linters aggregator.
+
+**Features**:
+- Detects golangci-lint usage in multiple locations:
+  - GitHub Actions workflows (`.github/workflows/*.yml`)
+  - Makefiles (`Makefile`)
+  - Configuration files (`.golangci.yml`, `.golangci.yaml`)
+- Compares versions against the latest release from GitHub
+- Creates/updates GitHub issues on outdated repositories (optional)
+- Maintains a central tracking issue in telco-bot repo
+- Caches non-Go repos, forks, and abandoned repos for performance
+- Generates markdown report with update instructions
+- Skips repositories inactive for >6 months
+
+**Usage**:
+```bash
+# Basic scan (read-only mode)
+./golangci-lint-checker.sh
+
+# Create/update GitHub issues for outdated repos
+./golangci-lint-checker.sh --create-issues
+
+# Skip updating the central tracking issue
+./golangci-lint-checker.sh --no-tracking
+
+# Clear all caches and rescan
+./golangci-lint-checker.sh --clear-cache
+
+# Show help
+./golangci-lint-checker.sh --help
+```
+
+**Configuration**:
+- Edit `ORGS` array in script to change scanned organizations
+- Add individual repos to `golangci-lint-repo-list.txt` (one per line)
+- Exclude repos via `golangci-lint-repo-blocklist.txt`
+
+**Output**:
+- Real-time progress for each repository
+- Per-organization summary
+- `golangci-lint-report.md` - Markdown report with update instructions
+- Optional GitHub issues on each outdated repo
+- Central tracking issue: "Tracking Outdated GolangCI-Lint Versions"
+
+**Example Output**:
+```
+✅ Repository: org/repo on branch main... ✓ Up-to-date (v1.55.2)
+❌ Repository: org/old-repo on branch main... ✗ OUTDATED (v1.50.0 in .github/workflows/lint.yml)
+```
+
+**Detection Patterns**:
+The script searches for golangci-lint version specifications in:
+1. GitHub Actions: `golangci/golangci-lint-action@vX.Y.Z`
+2. Makefiles: `GOLANGCI_LINT_VERSION = vX.Y.Z`
+3. Makefiles: `go install github.com/golangci/golangci-lint/cmd/golangci-lint@vX.Y.Z`
+4. Config files: Version specifications in `.golangci.yml` or `.golangci.yaml`
+
+**Update Recommendation**:
+The script provides specific instructions for updating golangci-lint in different contexts (GitHub Actions, Makefiles, direct installation).
 
 ---
 
@@ -540,6 +605,24 @@ Optional list of individual repositories to scan for golang/mock usage.
 
 ---
 
+### golangci-lint-repo-list.txt
+
+Optional list of individual repositories to scan for golangci-lint version checking.
+
+**Format**: Same as `go-version-repo-list.txt`
+
+---
+
+### golangci-lint-repo-blocklist.txt
+
+List of repositories to exclude from golangci-lint version scanning.
+
+**Format**: Same as `go-version-repo-blocklist.txt`
+
+**Comments**: Lines starting with `#` or `//` are ignored.
+
+---
+
 ### xcrypto-repo-list.txt
 
 Optional list of individual repositories to scan for x/crypto usage.
@@ -584,6 +667,9 @@ Several scripts maintain cache files in the repository root:
 - `.go-version-checker-forks.cache` - Fork repositories
 - `.go-version-checker-abandoned.cache` - Abandoned repositories
 - `.gomock-lookup-nogomod.cache` - Repositories without go.mod
+- `.golangci-lint-checker.cache` - Non-Go repositories (golangci-lint checker)
+- `.golangci-lint-checker-forks.cache` - Fork repositories (golangci-lint checker)
+- `.golangci-lint-checker-abandoned.cache` - Abandoned repositories (golangci-lint checker)
 
 These caches improve performance on subsequent runs. Use `--clear-cache` where supported to force a full rescan.
 
