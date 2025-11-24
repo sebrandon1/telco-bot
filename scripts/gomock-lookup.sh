@@ -52,6 +52,7 @@
 #   - Final summary with total counts and usage percentage
 #   - Color-coded output for easy reading
 #   - Table format output showing all repositories using deprecated golang/mock
+#   - PR status check for open pull requests related to gomock migration
 #   - Markdown report file (gomock-usage-report.md)
 #   - Automatic creation/update of central tracking issue in telco-bot repo
 #
@@ -177,6 +178,29 @@ is_repo_abandoned() {
 	fi
 }
 
+# Helper function to check for open PRs related to gomock migration
+check_gomock_pr() {
+	local repo="$1"
+
+	# List all open PRs and grep for keywords in the title
+	# Note: --search flag does global search, not repo-specific, so we use grep instead
+	local pr_search=$(gh pr list --repo "$repo" --state open --json number,title,url --limit 50 2>/dev/null)
+
+	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
+		echo "none"
+		return
+	fi
+
+	# Filter PRs that have gomock-related keywords in the title
+	local pr_links=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|golang/mock|uber.org/mock|go.uber.org/mock"; "i")) | "#" + (.number|tostring) + ";" + .url' | head -1)
+
+	if [[ -n "$pr_links" ]]; then
+		echo "$pr_links"
+	else
+		echo "none"
+	fi
+}
+
 # Terminal colors
 GREEN="\033[0;32m"
 RED="\033[0;31m"
@@ -192,7 +216,7 @@ TRACKING_ISSUE_TITLE="Tracking Deprecated golang/mock Usage"
 # Array to store repositories using deprecated golang/mock
 declare -a DEPRECATED_REPOS
 
-# Temporary file to store org-specific data for tracking issue (with last commit date)
+# Temporary file to store org-specific data for tracking issue (with last commit date and PR status)
 ORG_DATA_FILE=$(mktemp)
 
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR DEPRECATED GOLANG/MOCK USAGE${RESET}"
@@ -275,8 +299,11 @@ for ORG_NAME in "${ORGS[@]}"; do
 			# Fetch last commit date from default branch for tracking issue
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
-			# Store for org-specific data: org|repo|branch|last_commit
-			echo "$ORG_NAME|$repo|$branch|$last_commit" >>"$ORG_DATA_FILE"
+			# Check for open PRs related to gomock migration
+			pr_status=$(check_gomock_pr "$repo")
+
+			# Store for org-specific data: org|repo|branch|last_commit|pr_status
+			echo "$ORG_NAME|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${GREEN}✓ No deprecated usage${RESET}"
 		fi
@@ -384,8 +411,11 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			# Fetch last commit date from default branch for tracking issue
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
-			# Store for org-specific data: org|repo|branch|last_commit
-			echo "Individual Repositories|$repo|$branch|$last_commit" >>"$ORG_DATA_FILE"
+			# Check for open PRs related to gomock migration
+			pr_status=$(check_gomock_pr "$repo")
+
+			# Store for org-specific data: org|repo|branch|last_commit|pr_status
+			echo "Individual Repositories|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${GREEN}✓ No deprecated usage${RESET}"
 		fi
@@ -609,12 +639,12 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 			ISSUE_BODY+="**Repositories Using Deprecated golang/mock:** ${ORG_COUNT}
 
-| Repository | Branch | Last Updated | GitHub Link |
-|------------|--------|--------------|-------------|
+| Repository | Branch | Last Updated | PR Status | GitHub Link |
+|------------|--------|--------------|-----------|-------------|
 "
 
 			# Sort by last commit date (most recent first) and add each repo to the table
-			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit; do
+			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit pr_status; do
 				# Extract just the repo name (without org prefix)
 				repo_name="${repo##*/}"
 				# Escape pipe characters in repo names if any
@@ -626,7 +656,16 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				else
 					last_commit_display="Unknown"
 				fi
-				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | [View Repository](https://github.com/${repo}) |"
+				# Format PR status
+				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
+					pr_display="—"
+				else
+					# Parse pr_status format: #123;https://github.com/org/repo/pull/123
+					pr_number=$(echo "$pr_status" | cut -d';' -f1)
+					pr_url=$(echo "$pr_status" | cut -d';' -f2)
+					pr_display="[${pr_number}](${pr_url})"
+				fi
+				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} | [View Repository](https://github.com/${repo}) |"
 			done >>"${ORG_DATA_FILE}.table"
 
 			ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")

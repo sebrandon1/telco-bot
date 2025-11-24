@@ -1,0 +1,49 @@
+name: io/ioutil Deprecation Checker - Daily Update
+
+on:
+  schedule:
+    # Run daily at 7:30 AM UTC (2:30 AM EST / 3:30 AM EDT)
+    - cron: '30 7 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-ioutil-usage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+      
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      
+      - name: Run io/ioutil deprecation checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Make script executable
+          chmod +x scripts/ioutil-deprecation-checker.sh
+          
+          # Run the script to update tracking issue
+          ./scripts/ioutil-deprecation-checker.sh
+      
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ioutil-usage-report
+          path: |
+            ioutil-usage-report.md
+            .ioutil-checker-*.cache
+            .ioutil-checker-results.json
+          retention-days: 7
+
+

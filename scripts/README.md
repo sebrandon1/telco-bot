@@ -7,6 +7,7 @@ This directory contains automation scripts for monitoring and managing GitHub re
 - [Repository Scanning Scripts](#repository-scanning-scripts)
   - [go-version-checker.sh](#go-version-checkersh)
   - [gomock-lookup.sh](#gomock-lookupsh)
+  - [ioutil-deprecation-checker.sh](#ioutil-deprecation-checkersh)
   - [golangci-lint-checker.sh](#golangci-lint-checkersh)
   - [xcrypto-lookup.sh](#xcrypto-lookupsh)
   - [ubi-lookup.sh](#ubi-lookupsh)
@@ -107,6 +108,67 @@ This directory contains automation scripts for monitoring and managing GitHub re
 
 **Migration Recommendation**:
 The script recommends migrating to `go.uber.org/mock`, the maintained fork of golang/mock.
+
+---
+
+### ioutil-deprecation-checker.sh
+
+**Purpose**: Identifies repositories using the deprecated `io/ioutil` package, which was deprecated in Go 1.16 (February 2021). The functionality has been moved to the `io` and `os` packages.
+
+**Features**:
+- Uses GitHub's code search API to detect io/ioutil usage in Go files
+- Intelligent results caching to avoid rate limits (6-hour cache lifetime)
+- Generates markdown report with migration guide
+- Maintains central tracking issue in telco-bot repo
+- Caches forks, non-Go repos, and abandoned repos
+- Skips repos with no commits in last 6 months
+- Tracks API success/failure and caches results
+
+**Usage**:
+```bash
+# Scan all default organizations (uses cache if < 6 hours old)
+./ioutil-deprecation-checker.sh
+
+# Force refresh, ignoring cache
+./ioutil-deprecation-checker.sh --force
+
+# Show help
+./ioutil-deprecation-checker.sh --help
+```
+
+**Configuration**:
+- Edit `ORGS` array in script to change scanned organizations
+
+**Caching**:
+The script maintains a JSON results cache (`.ioutil-checker-results.json`) that stores:
+- Which repos use io/ioutil
+- Which repos don't use it
+- Whether API calls succeeded
+- Last check timestamp
+
+The cache is valid for 6 hours and significantly reduces API calls on subsequent runs. Use `--force` to bypass the cache.
+
+**Output**:
+- Real-time progress for each repository
+- Per-organization summary
+- `ioutil-usage-report.md` - Markdown report with migration guide
+- Central tracking issue: "Tracking Deprecated io/ioutil Package Usage"
+
+**Migration Mapping**:
+The script provides a comprehensive migration guide showing the replacement for each deprecated function:
+
+| Deprecated (io/ioutil) | Replacement | Package |
+|------------------------|-------------|---------|
+| `ioutil.Discard` | `io.Discard` | io |
+| `ioutil.NopCloser` | `io.NopCloser` | io |
+| `ioutil.ReadAll` | `io.ReadAll` | io |
+| `ioutil.ReadDir` | `os.ReadDir` | os |
+| `ioutil.ReadFile` | `os.ReadFile` | os |
+| `ioutil.TempDir` | `os.MkdirTemp` | os |
+| `ioutil.TempFile` | `os.CreateTemp` | os |
+| `ioutil.WriteFile` | `os.WriteFile` | os |
+
+**Reference**: [Go 1.16 Release Notes](https://go.dev/doc/go1.16)
 
 ---
 
@@ -670,8 +732,12 @@ Several scripts maintain cache files in the repository root:
 - `.golangci-lint-checker.cache` - Non-Go repositories (golangci-lint checker)
 - `.golangci-lint-checker-forks.cache` - Fork repositories (golangci-lint checker)
 - `.golangci-lint-checker-abandoned.cache` - Abandoned repositories (golangci-lint checker)
+- `.ioutil-checker-forks.cache` - Fork repositories (ioutil checker)
+- `.ioutil-checker-nogo.cache` - Non-Go repositories (ioutil checker)
+- `.ioutil-checker-abandoned.cache` - Abandoned repositories (ioutil checker)
+- `.ioutil-checker-results.json` - JSON cache of io/ioutil scan results (6-hour lifetime)
 
-These caches improve performance on subsequent runs. Use `--clear-cache` where supported to force a full rescan.
+These caches improve performance on subsequent runs. Use `--clear-cache` or `--force` where supported to force a full rescan.
 
 ### Color-Coded Output
 All scripts use consistent color coding:
