@@ -114,6 +114,7 @@ TOTAL_REPOS=0
 SKIPPED_FORKS=0
 SKIPPED_NOGO=0
 SKIPPED_ABANDONED=0
+SKIPPED_TRACKING_ISSUE=0
 
 # Cache files
 FORK_CACHE=".ioutil-checker-forks.cache"
@@ -130,6 +131,54 @@ CACHE_MAX_AGE=$((6 * 60 * 60))
 
 # Create empty cache files if they don't exist
 touch "$FORK_CACHE" "$NOGO_CACHE" "$ABANDONED_CACHE"
+
+#===============================================================================
+# HELPER FUNCTIONS - Must be defined before use
+#===============================================================================
+
+# Helper function to check if repo is in cache
+is_in_cache() {
+	local repo="$1"
+	local cache_file="$2"
+	grep -Fxq "$repo" "$cache_file" 2>/dev/null
+}
+
+# Helper function to check if results cache is valid (less than 6 hours old)
+is_cache_valid() {
+	if [ ! -f "$RESULTS_CACHE" ]; then
+		return 1
+	fi
+
+	if [ "$FORCE_REFRESH" = true ]; then
+		return 1
+	fi
+
+	# Get cache timestamp
+	local cache_timestamp=$(jq -r '.timestamp // empty' "$RESULTS_CACHE" 2>/dev/null)
+	if [ -z "$cache_timestamp" ]; then
+		return 1
+	fi
+
+	# Convert to epoch seconds (cross-platform compatible)
+	local cache_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$cache_timestamp" "+%s" 2>/dev/null || date -d "$cache_timestamp" "+%s" 2>/dev/null)
+	local now_epoch=$(date "+%s")
+
+	if [ -z "$cache_epoch" ]; then
+		return 1
+	fi
+
+	local age=$((now_epoch - cache_epoch))
+
+	if [ $age -lt $CACHE_MAX_AGE ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+#===============================================================================
+# LOAD CACHES
+#===============================================================================
 
 # Load fork cache info if it exists
 FORK_COUNT_LOADED=0
@@ -191,46 +240,6 @@ fi
 
 # Temporary file to track newly discovered non-Go repos
 NOGO_TEMP=$(mktemp)
-
-# Helper function to check if repo is in cache
-is_in_cache() {
-	local repo="$1"
-	local cache_file="$2"
-	grep -Fxq "$repo" "$cache_file" 2>/dev/null
-}
-
-# Helper function to check if results cache is valid (less than 6 hours old)
-is_cache_valid() {
-	if [ ! -f "$RESULTS_CACHE" ]; then
-		return 1
-	fi
-
-	if [ "$FORCE_REFRESH" = true ]; then
-		return 1
-	fi
-
-	# Get cache timestamp
-	local cache_timestamp=$(jq -r '.timestamp // empty' "$RESULTS_CACHE" 2>/dev/null)
-	if [ -z "$cache_timestamp" ]; then
-		return 1
-	fi
-
-	# Convert to epoch seconds (cross-platform compatible)
-	local cache_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$cache_timestamp" "+%s" 2>/dev/null || date -d "$cache_timestamp" "+%s" 2>/dev/null)
-	local now_epoch=$(date "+%s")
-
-	if [ -z "$cache_epoch" ]; then
-		return 1
-	fi
-
-	local age=$((now_epoch - cache_epoch))
-
-	if [ $age -lt $CACHE_MAX_AGE ]; then
-		return 0
-	else
-		return 1
-	fi
-}
 
 # Helper function to get cached result for a repository
 get_cached_result() {
@@ -392,6 +401,94 @@ declare -a DEPRECATED_REPOS
 # Temporary file to store org-specific data for tracking issue
 ORG_DATA_FILE=$(mktemp)
 
+# Temporary file to store tracking issue cache
+TRACKING_ISSUE_CACHE=$(mktemp)
+
+# Helper function to fetch and parse tracking issue
+fetch_tracking_issue() {
+	echo -e "${BLUE}📋 Fetching tracking issue to reduce API calls...${RESET}"
+
+	# Get the tracking issue number
+	local issue_number=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
+
+	if [ -z "$issue_number" ]; then
+		echo -e "${YELLOW}   ⚠️  Tracking issue not found, will perform full scan${RESET}"
+		return 1
+	fi
+
+	# Fetch the issue body
+	local issue_body=$(gh issue view "$issue_number" --repo "$TRACKING_REPO" --json body --jq '.body')
+
+	if [ -z "$issue_body" ]; then
+		echo -e "${YELLOW}   ⚠️  Could not fetch issue body, will perform full scan${RESET}"
+		return 1
+	fi
+
+	# Parse the markdown tables to extract repo names and last updated dates
+	# Format: | [repo-name](url) | branch | 2025-11-24 | PR Status | Link |
+	echo "$issue_body" | grep -E '^\|.*github\.com.*\|.*\|.*[0-9]{4}-[0-9]{2}-[0-9]{2}.*\|' | while IFS='|' read -r _ repo_col branch_col date_col _; do
+		# Extract repo name from markdown link [name](url)
+		local repo=$(echo "$repo_col" | sed -n 's/.*github\.com\/\([^)]*\).*/\1/p' | tr -d ' `[]')
+		# Extract date (format: 2025-11-24)
+		local last_updated=$(echo "$date_col" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+
+		if [ -n "$repo" ] && [ -n "$last_updated" ]; then
+			echo "${repo}|${last_updated}" >>"$TRACKING_ISSUE_CACHE"
+		fi
+	done
+
+	if [ -f "$TRACKING_ISSUE_CACHE" ] && [ -s "$TRACKING_ISSUE_CACHE" ]; then
+		local cached_count=$(wc -l <"$TRACKING_ISSUE_CACHE" | tr -d ' ')
+		echo -e "${GREEN}   ✓ Loaded ${cached_count} repositories from tracking issue${RESET}"
+		echo -e "${BLUE}   Repos updated in last 24h will be assumed to still use io/ioutil${RESET}"
+		return 0
+	else
+		echo -e "${YELLOW}   ⚠️  No repos found in tracking issue, will perform full scan${RESET}"
+		return 1
+	fi
+}
+
+# Helper function to check if repo is in tracking issue and recently updated
+is_recently_confirmed() {
+	local repo="$1"
+
+	if [ ! -f "$TRACKING_ISSUE_CACHE" ] || [ ! -s "$TRACKING_ISSUE_CACHE" ]; then
+		return 1
+	fi
+
+	# Look for the repo in the cache
+	local cached_entry=$(grep "^${repo}|" "$TRACKING_ISSUE_CACHE" | head -1)
+
+	if [ -z "$cached_entry" ]; then
+		return 1
+	fi
+
+	# Extract the date
+	local last_updated=$(echo "$cached_entry" | cut -d'|' -f2)
+
+	# Validate the date format
+	if [ -z "$last_updated" ] || ! [[ "$last_updated" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+		# Invalid or missing date, don't use the cache
+		return 1
+	fi
+
+	# Calculate 24 hours ago in UTC
+	local cutoff_time=$(date -u -v-24H "+%Y-%m-%d" 2>/dev/null || date -u -d "24 hours ago" "+%Y-%m-%d" 2>/dev/null)
+
+	if [ -z "$cutoff_time" ]; then
+		# If date calculation fails, don't use the cache
+		return 1
+	fi
+
+	# Compare dates (using [[ ]] for string comparison with YYYY-MM-DD format)
+	# Lexicographic comparison works for YYYY-MM-DD: if NOT less than cutoff, it's >= cutoff
+	if ! [[ "$last_updated" < "$cutoff_time" ]]; then
+		return 0 # Recently confirmed (within last 24h)
+	else
+		return 1 # Too old, need to recheck
+	fi
+}
+
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR DEPRECATED IO/IOUTIL USAGE${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
 echo -e "${YELLOW}⚠️  Note: io/ioutil was deprecated in Go 1.16 (February 2021)${RESET}"
@@ -399,6 +496,10 @@ echo -e "${YELLOW}    Functionality moved to io and os packages${RESET}"
 echo -e "${BLUE}───────────────────────────────────────────────────────────${RESET}"
 echo -e "${BLUE}📅 Skipping repos with no commits since: ${CUTOFF_DATE:0:10}${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
+echo
+
+# Fetch tracking issue to reduce API calls
+fetch_tracking_issue
 echo
 
 for ORG_NAME in "${ORGS[@]}"; do
@@ -459,6 +560,27 @@ for ORG_NAME in "${ORGS[@]}"; do
 		if is_in_cache "$repo" "$NOGO_CACHE"; then
 			echo -e "${BLUE}⏩ skipped (no go.mod)${RESET}"
 			SKIPPED_NOGO=$((SKIPPED_NOGO + 1))
+			continue
+		fi
+
+		# Check if repo is recently confirmed in tracking issue (within 24h)
+		if is_recently_confirmed "$repo"; then
+			echo -e "${RED}⚠️  USES DEPRECATED io/ioutil ${BLUE}(from tracking issue - skipped API)${RESET}"
+			echo "$repo" >>"$temp_results"
+			DEPRECATED_REPOS+=("$repo")
+			SKIPPED_TRACKING_ISSUE=$((SKIPPED_TRACKING_ISSUE + 1))
+
+			# Update cache
+			update_cache_result "$repo" "true" "true"
+
+			# Fetch last commit date from default branch for tracking issue
+			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
+
+			# Check for open PRs related to ioutil migration
+			pr_status=$(check_ioutil_pr "$repo")
+
+			# Store for org-specific data: org|repo|branch|last_commit|pr_status
+			echo "$ORG_NAME|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
 			continue
 		fi
 
@@ -570,6 +692,7 @@ echo -e "${BOLD}   Total repositories scanned:${RESET} ${TOTAL_REPOS}"
 echo -e "${BOLD}   Repositories skipped (forks):${RESET} ${BLUE}${SKIPPED_FORKS}${RESET}"
 echo -e "${BOLD}   Repositories skipped (abandoned):${RESET} ${BLUE}${SKIPPED_ABANDONED}${RESET}"
 echo -e "${BOLD}   Repositories skipped (non-Go):${RESET} ${BLUE}${SKIPPED_NOGO}${RESET}"
+echo -e "${BOLD}   API calls saved (tracking issue):${RESET} ${GREEN}${SKIPPED_TRACKING_ISSUE}${RESET}"
 echo -e "${BOLD}   Repositories with deprecated io/ioutil:${RESET} ${RED}${FOUND_COUNT}${RESET}"
 
 # Calculate percentage safely (avoid division by zero)
@@ -907,6 +1030,6 @@ echo -e "${BLUE}💾 Updating results cache timestamp...${RESET}"
 update_cache_timestamp
 
 # Cleanup temporary files
-rm -f "$ORG_DATA_FILE"
+rm -f "$ORG_DATA_FILE" "$TRACKING_ISSUE_CACHE"
 
 echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"
