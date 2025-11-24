@@ -21,7 +21,7 @@ jobs:
         run: sudo apt-get install jq -y
 
       - name: Clone the telco-bot repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -30,7 +30,7 @@ jobs:
 
       # Clone the go-quay repository
       - name: Checkout go-quay
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: 'sebrandon1/go-quay'
           path: go-quay

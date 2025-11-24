@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get install jq -y
 
       - name: Clone the telco-bot repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Check if XCRYPTO_LOOKUP_GITHUB_TOKEN secret exists
         run: |
