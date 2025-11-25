@@ -368,13 +368,13 @@ check_ioutil_usage() {
 	fi
 }
 
-# Helper function to check for open PRs related to ioutil migration
+# Helper function to check for PRs related to ioutil migration (open, closed, or merged)
 check_ioutil_pr() {
 	local repo="$1"
 
-	# List all open PRs and grep for keywords in the title
-	# Note: --search flag does global search, not repo-specific, so we use grep instead
-	local pr_search=$(gh pr list --repo "$repo" --state open --json number,title,url --limit 50 2>/dev/null)
+	# List all PRs (open, closed, merged) and filter for ioutil-related keywords
+	# Check both open and closed PRs (closed includes merged)
+	local pr_search=$(gh pr list --repo "$repo" --state all --json number,title,url,state,mergedAt --limit 100 2>/dev/null)
 
 	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
 		echo "none"
@@ -382,10 +382,18 @@ check_ioutil_pr() {
 	fi
 
 	# Filter PRs that have ioutil-related keywords in the title
-	local pr_links=$(echo "$pr_search" | jq -r '.[] | select(.title | test("ioutil|io/ioutil"; "i")) | "#" + (.number|tostring) + ";" + .url' | head -1)
+	# Return format: #123;URL;STATUS (STATUS = open/merged/closed)
+	local pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("ioutil|io/ioutil"; "i")) | 
+		if .mergedAt != null then
+			"#" + (.number|tostring) + ";" + .url + ";merged"
+		elif .state == "OPEN" then
+			"#" + (.number|tostring) + ";" + .url + ";open"
+		else
+			"#" + (.number|tostring) + ";" + .url + ";closed"
+		end' | head -1)
 
-	if [[ -n "$pr_links" ]]; then
-		echo "$pr_links"
+	if [[ -n "$pr_info" ]]; then
+		echo "$pr_info"
 	else
 		echo "none"
 	fi
@@ -905,14 +913,32 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				else
 					last_commit_display="Unknown"
 				fi
-				# Format PR status
+				# Format PR status with emoji indicators
 				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
 					pr_display="—"
 				else
-					# Parse pr_status format: #123;https://github.com/org/repo/pull/123
+					# Parse pr_status format: #123;https://github.com/org/repo/pull/123;status
 					pr_number=$(echo "$pr_status" | cut -d';' -f1)
 					pr_url=$(echo "$pr_status" | cut -d';' -f2)
-					pr_display="[${pr_number}](${pr_url})"
+					pr_state=$(echo "$pr_status" | cut -d';' -f3)
+
+					# Add emoji based on PR state
+					case "$pr_state" in
+					"merged")
+						pr_emoji="✅"
+						;;
+					"open")
+						pr_emoji="🔄"
+						;;
+					"closed")
+						pr_emoji="❌"
+						;;
+					*)
+						pr_emoji=""
+						;;
+					esac
+
+					pr_display="${pr_emoji} [${pr_number}](${pr_url})"
 				fi
 				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} | [View Repository](https://github.com/${repo}) |"
 			done >>"${ORG_DATA_FILE}.table"
