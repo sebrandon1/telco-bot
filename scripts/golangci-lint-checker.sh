@@ -817,8 +817,8 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 				ISSUE_BODY+="**Repositories with Outdated GolangCI-Lint:** ${ORG_COUNT}
 
-| Repository | Current Version | Latest Version | Source File | Last Updated | GitHub Link |
-|------------|-----------------|----------------|-------------|--------------|-------------|
+| Repository | Current Version | Latest Version | Source File | Last Updated |
+|------------|-----------------|----------------|-------------|--------------|
 "
 
 				# Sort by last commit date (most recent first) and add each repo to the table
@@ -833,7 +833,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 					else
 						last_commit_display="Unknown"
 					fi
-					echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`v${current}\` | \`v${latest}\` | \`${source}\` | ${last_commit_display} | [View Repository](https://github.com/${repo}) |"
+					echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`v${current}\` | \`v${latest}\` | \`${source}\` | ${last_commit_display} |"
 				done >>"${ORG_DATA_FILE}.table"
 
 				ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")
