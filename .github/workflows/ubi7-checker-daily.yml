@@ -1,0 +1,50 @@
+name: UBI7 (EOL) Usage Checker - Daily Update
+
+on:
+  schedule:
+    # Run daily at 8:00 AM UTC (3:00 AM EST / 4:00 AM EDT)
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-ubi7-usage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      
+      - name: Run UBI7 usage checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Make script executable
+          chmod +x scripts/ubi-lookup.sh
+          
+          # Check for ubi7 usage (EOL) - no issue creation
+          echo "Checking for ubi7 usage..."
+          ./scripts/ubi-lookup.sh --version ubi7 --no-issue
+      
+      - name: Run UBI7-minimal usage checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for ubi7-minimal usage (EOL) - no issue creation
+          echo "Checking for ubi7-minimal usage..."
+          ./scripts/ubi-lookup.sh --version ubi7-minimal --no-issue
+      
+      - name: Upload reports as artifacts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ubi7-family-usage-reports
+          path: |
+            ubi-ubi7-usage-report.md
+            ubi-ubi7-minimal-usage-report.md
+            .ubi-checker-*.cache
+          retention-days: 7
+
+

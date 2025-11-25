@@ -1,0 +1,64 @@
+name: UBI Usage Checker - Manual Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      ubi_version:
+        description: 'UBI version to check for (e.g., ubi7, ubi8, ubi9, ubi7-minimal)'
+        required: true
+        default: 'ubi7'
+      organization:
+        description: 'Specific organization to scan (leave empty for all default orgs)'
+        required: false
+        default: ''
+      create_issue:
+        description: 'Create/update GitHub tracking issue'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  check-ubi-usage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      
+      - name: Run UBI usage checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Make script executable
+          chmod +x scripts/ubi-lookup.sh
+          
+          # Build command with optional parameters
+          CMD="./scripts/ubi-lookup.sh --version ${{ inputs.ubi_version }}"
+          
+          # Add organization if specified
+          if [ -n "${{ inputs.organization }}" ]; then
+            CMD="$CMD --org ${{ inputs.organization }}"
+          fi
+          
+          # Skip issue creation unless explicitly requested
+          if [ "${{ inputs.create_issue }}" != "true" ]; then
+            CMD="$CMD --no-issue"
+          fi
+          
+          echo "Running: $CMD"
+          $CMD
+      
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ubi-${{ inputs.ubi_version }}-usage-report
+          path: |
+            ubi-${{ inputs.ubi_version }}-usage-report.md
+            .ubi-checker-*.cache
+          retention-days: 7
+
+

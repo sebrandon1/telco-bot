@@ -192,7 +192,7 @@ check_gomock_pr() {
 	fi
 
 	# Filter PRs that have gomock-related keywords in the title
-	local pr_links=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|golang/mock|uber.org/mock|go.uber.org/mock"; "i")) | "#" + (.number|tostring) + ";" + .url' | head -1)
+	local pr_links=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|mockgen|golang/mock|uber.org/mock|go.uber.org/mock|uber-go/mock"; "i")) | "#" + (.number|tostring) + ";" + .url' | head -1)
 
 	if [[ -n "$pr_links" ]]; then
 		echo "$pr_links"
