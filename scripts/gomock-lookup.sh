@@ -178,13 +178,13 @@ is_repo_abandoned() {
 	fi
 }
 
-# Helper function to check for open PRs related to gomock migration
+# Helper function to check for PRs related to gomock migration (open, closed, or merged)
 check_gomock_pr() {
 	local repo="$1"
 
-	# List all open PRs and grep for keywords in the title
-	# Note: --search flag does global search, not repo-specific, so we use grep instead
-	local pr_search=$(gh pr list --repo "$repo" --state open --json number,title,url --limit 50 2>/dev/null)
+	# List all PRs (open, closed, merged) and filter for gomock-related keywords
+	# Check both open and closed PRs (closed includes merged)
+	local pr_search=$(gh pr list --repo "$repo" --state all --json number,title,url,state,mergedAt --limit 100 2>/dev/null)
 
 	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
 		echo "none"
@@ -192,12 +192,51 @@ check_gomock_pr() {
 	fi
 
 	# Filter PRs that have gomock-related keywords in the title
-	local pr_links=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|golang/mock|uber.org/mock|go.uber.org/mock"; "i")) | "#" + (.number|tostring) + ";" + .url' | head -1)
+	# Return format: #123;URL;STATUS (STATUS = open/merged/closed)
+	local pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|mockgen|golang/mock|uber-go/mock|uber.org/mock|go.uber.org/mock"; "i")) | 
+		if .mergedAt != null then
+			"#" + (.number|tostring) + ";" + .url + ";merged"
+		elif .state == "OPEN" then
+			"#" + (.number|tostring) + ";" + .url + ";open"
+		else
+			"#" + (.number|tostring) + ";" + .url + ";closed"
+		end' | head -1)
 
-	if [[ -n "$pr_links" ]]; then
-		echo "$pr_links"
+	if [[ -n "$pr_info" ]]; then
+		echo "$pr_info"
 	else
 		echo "none"
+	fi
+}
+
+# Helper function to check if an open PR needs a rebase
+check_pr_needs_rebase() {
+	local repo="$1"
+	local pr_number="$2"
+
+	# Get PR mergeable state
+	local pr_details=$(gh pr view "$pr_number" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)
+
+	if [[ $? -ne 0 || -z "$pr_details" ]]; then
+		echo "unknown"
+		return
+	fi
+
+	# Check if PR is behind base branch or has conflicts
+	local mergeable=$(echo "$pr_details" | jq -r '.mergeable // "UNKNOWN"')
+	local merge_state=$(echo "$pr_details" | jq -r '.mergeStateStatus // "UNKNOWN"')
+
+	# BEHIND means the PR needs to be updated with base branch changes
+	# CONFLICTING means there are merge conflicts
+	# BLOCKED can indicate various issues including being out of date
+	if [ "$merge_state" = "BEHIND" ] || [ "$merge_state" = "DIRTY" ]; then
+		echo "needs_rebase"
+	elif [ "$mergeable" = "CONFLICTING" ]; then
+		echo "has_conflicts"
+	elif [ "$merge_state" = "CLEAN" ] || [ "$merge_state" = "UNSTABLE" ]; then
+		echo "up_to_date"
+	else
+		echo "unknown"
 	fi
 }
 
@@ -299,11 +338,21 @@ for ORG_NAME in "${ORGS[@]}"; do
 			# Fetch last commit date from default branch for tracking issue
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
-			# Check for open PRs related to gomock migration
+			# Check for PRs related to gomock migration
 			pr_status=$(check_gomock_pr "$repo")
 
-			# Store for org-specific data: org|repo|branch|last_commit|pr_status
-			echo "$ORG_NAME|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
+			# If PR is open, check if it needs a rebase
+			pr_rebase_status=""
+			if [[ "$pr_status" != "none" ]]; then
+				pr_state=$(echo "$pr_status" | cut -d';' -f3)
+				if [ "$pr_state" = "open" ]; then
+					pr_number=$(echo "$pr_status" | cut -d';' -f1 | sed 's/#//')
+					pr_rebase_status=$(check_pr_needs_rebase "$repo" "$pr_number")
+				fi
+			fi
+
+			# Store for org-specific data: org|repo|branch|last_commit|pr_status|pr_rebase_status
+			echo "$ORG_NAME|$repo|$branch|$last_commit|$pr_status|$pr_rebase_status" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${GREEN}✓ No deprecated usage${RESET}"
 		fi
@@ -411,11 +460,21 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			# Fetch last commit date from default branch for tracking issue
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
-			# Check for open PRs related to gomock migration
+			# Check for PRs related to gomock migration
 			pr_status=$(check_gomock_pr "$repo")
 
-			# Store for org-specific data: org|repo|branch|last_commit|pr_status
-			echo "Individual Repositories|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
+			# If PR is open, check if it needs a rebase
+			pr_rebase_status=""
+			if [[ "$pr_status" != "none" ]]; then
+				pr_state=$(echo "$pr_status" | cut -d';' -f3)
+				if [ "$pr_state" = "open" ]; then
+					pr_number=$(echo "$pr_status" | cut -d';' -f1 | sed 's/#//')
+					pr_rebase_status=$(check_pr_needs_rebase "$repo" "$pr_number")
+				fi
+			fi
+
+			# Store for org-specific data: org|repo|branch|last_commit|pr_status|pr_rebase_status
+			echo "Individual Repositories|$repo|$branch|$last_commit|$pr_status|$pr_rebase_status" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${GREEN}✓ No deprecated usage${RESET}"
 		fi
@@ -639,12 +698,12 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 			ISSUE_BODY+="**Repositories Using Deprecated golang/mock:** ${ORG_COUNT}
 
-| Repository | Branch | Last Updated | PR Status | GitHub Link |
-|------------|--------|--------------|-----------|-------------|
+| Repository | Branch | Last Updated | PR Status |
+|------------|--------|--------------|-----------|
 "
 
 			# Sort by last commit date (most recent first) and add each repo to the table
-			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit pr_status; do
+			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit pr_status pr_rebase_status; do
 				# Extract just the repo name (without org prefix)
 				repo_name="${repo##*/}"
 				# Escape pipe characters in repo names if any
@@ -656,16 +715,48 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				else
 					last_commit_display="Unknown"
 				fi
-				# Format PR status
+				# Format PR status with emoji indicators
 				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
 					pr_display="—"
 				else
-					# Parse pr_status format: #123;https://github.com/org/repo/pull/123
+					# Parse pr_status format: #123;https://github.com/org/repo/pull/123;status
 					pr_number=$(echo "$pr_status" | cut -d';' -f1)
 					pr_url=$(echo "$pr_status" | cut -d';' -f2)
-					pr_display="[${pr_number}](${pr_url})"
+					pr_state=$(echo "$pr_status" | cut -d';' -f3)
+
+					# Add emoji based on PR state
+					case "$pr_state" in
+					"merged")
+						pr_emoji="✅"
+						;;
+					"open")
+						pr_emoji="🔄"
+						# Add rebase status indicator for open PRs
+						if [ -n "$pr_rebase_status" ]; then
+							case "$pr_rebase_status" in
+							"needs_rebase")
+								pr_emoji="⚠️ 🔄"
+								;;
+							"has_conflicts")
+								pr_emoji="🔥 🔄"
+								;;
+							"up_to_date")
+								pr_emoji="✅ 🔄"
+								;;
+							esac
+						fi
+						;;
+					"closed")
+						pr_emoji="❌"
+						;;
+					*)
+						pr_emoji=""
+						;;
+					esac
+
+					pr_display="${pr_emoji} [${pr_number}](${pr_url})"
 				fi
-				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} | [View Repository](https://github.com/${repo}) |"
+				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} |"
 			done >>"${ORG_DATA_FILE}.table"
 
 			ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")
@@ -676,6 +767,20 @@ if [ $FOUND_COUNT -gt 0 ]; then
 	done
 
 	ISSUE_BODY+="---
+
+## PR Status Legend
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ | PR merged successfully |
+| ✅ 🔄 | PR open and up to date |
+| ⚠️ 🔄 | PR open but needs rebase (behind base branch) |
+| 🔥 🔄 | PR open with merge conflicts |
+| 🔄 | PR open (status unknown) |
+| ❌ | PR closed without merging |
+| — | No PR found |
+
+---
 
 ## What to Do
 
