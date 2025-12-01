@@ -382,18 +382,40 @@ check_ioutil_pr() {
 	fi
 
 	# Filter PRs that have ioutil-related keywords in the title
-	# Return format: #123;URL;STATUS (STATUS = open/merged/closed)
+	# Return format: #123;URL;STATUS;NEEDS_REBASE (STATUS = open/merged/closed)
 	local pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("ioutil|io/ioutil"; "i")) | 
 		if .mergedAt != null then
-			"#" + (.number|tostring) + ";" + .url + ";merged"
+			"#" + (.number|tostring) + ";" + .url + ";merged;no"
 		elif .state == "OPEN" then
-			"#" + (.number|tostring) + ";" + .url + ";open"
+			"#" + (.number|tostring) + ";" + .url + ";open;unknown"
 		else
-			"#" + (.number|tostring) + ";" + .url + ";closed"
+			"#" + (.number|tostring) + ";" + .url + ";closed;no"
 		end' | head -1)
 
 	if [[ -n "$pr_info" ]]; then
-		echo "$pr_info"
+		# If the PR is open, check if it needs a rebase
+		local pr_state=$(echo "$pr_info" | cut -d';' -f3)
+		if [ "$pr_state" = "open" ]; then
+			local pr_number=$(echo "$pr_info" | cut -d';' -f1 | sed 's/#//')
+			local pr_url=$(echo "$pr_info" | cut -d';' -f2)
+
+			# Check mergeable status - get both mergeable and mergeStateStatus
+			local pr_details=$(gh pr view "$pr_number" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)
+			local mergeable=$(echo "$pr_details" | jq -r '.mergeable // "UNKNOWN"')
+			local merge_state=$(echo "$pr_details" | jq -r '.mergeStateStatus // "UNKNOWN"')
+
+			# Determine if rebase is needed based on mergeable status and merge state
+			local needs_rebase="unknown"
+			if [ "$merge_state" = "BEHIND" ] || [ "$mergeable" = "CONFLICTING" ]; then
+				needs_rebase="yes"
+			elif [ "$mergeable" = "MERGEABLE" ]; then
+				needs_rebase="no"
+			fi
+
+			echo "#${pr_number};${pr_url};open;${needs_rebase}"
+		else
+			echo "$pr_info"
+		fi
 	else
 		echo "none"
 	fi
@@ -896,8 +918,8 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 **Repositories Using Deprecated io/ioutil:** ${ORG_COUNT}
 
-| Repository | Branch | Last Updated | PR Status | GitHub Link |
-|------------|--------|--------------|-----------|-------------|
+| Repository | Branch | Last Updated | PR Status | Needs Rebase? |
+|------------|--------|--------------|-----------|---------------|
 "
 
 			# Sort by last commit date (most recent first) and add each repo to the table
@@ -913,14 +935,16 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				else
 					last_commit_display="Unknown"
 				fi
-				# Format PR status with emoji indicators
+				# Format PR status with emoji indicators and extract rebase status
 				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
 					pr_display="—"
+					rebase_display="—"
 				else
-					# Parse pr_status format: #123;https://github.com/org/repo/pull/123;status
+					# Parse pr_status format: #123;https://github.com/org/repo/pull/123;status;needs_rebase
 					pr_number=$(echo "$pr_status" | cut -d';' -f1)
 					pr_url=$(echo "$pr_status" | cut -d';' -f2)
 					pr_state=$(echo "$pr_status" | cut -d';' -f3)
+					needs_rebase=$(echo "$pr_status" | cut -d';' -f4)
 
 					# Add emoji based on PR state
 					case "$pr_state" in
@@ -939,8 +963,24 @@ if [ $FOUND_COUNT -gt 0 ]; then
 					esac
 
 					pr_display="${pr_emoji} [${pr_number}](${pr_url})"
+
+					# Format rebase status
+					case "$needs_rebase" in
+					"yes")
+						rebase_display="⚠️  Yes"
+						;;
+					"no")
+						rebase_display="✅ No"
+						;;
+					"unknown")
+						rebase_display="❓ Unknown"
+						;;
+					*)
+						rebase_display="—"
+						;;
+					esac
 				fi
-				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} | [View Repository](https://github.com/${repo}) |"
+				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} | ${rebase_display} |"
 			done >>"${ORG_DATA_FILE}.table"
 
 			ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")
