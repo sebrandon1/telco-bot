@@ -336,9 +336,9 @@ check_ioutil_usage() {
 	fi
 
 	# Use GitHub's code search API to look for io/ioutil imports
-	# Search for: "io/ioutil" in Go files (excluding vendor directories)
+	# Search for: "io/ioutil" in Go files (excluding vendor and deps directories)
 	# Note: Code Search API has strict rate limits (10 requests/min for authenticated users)
-	local search_result=$(gh api "search/code?q=io/ioutil+repo:${repo}+language:go+-path:vendor" 2>&1)
+	local search_result=$(gh api "search/code?q=io/ioutil+repo:${repo}+language:go+-path:vendor+-path:deps" 2>&1)
 	local api_status=$?
 
 	# Check if we got a rate limit error
