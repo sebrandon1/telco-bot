@@ -595,12 +595,12 @@ if [ ${#DEPRECATED_REPOS[@]} -gt 0 ]; then
 		echo ""
 		echo "## Repositories Using Deprecated golang/mock"
 		echo ""
-		echo "| # | Repository | GitHub URL |"
-		echo "|---|------------|------------|"
+		echo "| # | Repository |"
+		echo "|---|------------|"
 
 		counter=1
 		for repo in "${DEPRECATED_REPOS[@]}"; do
-			echo "| $counter | \`$repo\` | [View on GitHub](https://github.com/$repo) |"
+			echo "| $counter | [\`$repo\`](https://github.com/$repo) |"
 			counter=$((counter + 1))
 		done
 
@@ -716,8 +716,8 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 			ISSUE_BODY+="**Repositories Using Deprecated golang/mock:** ${ORG_COUNT}
 
-| Repository | Branch | Last Updated | PR Status |
-|------------|--------|--------------|-----------|
+| Repository | Last Updated | PR Status |
+|------------|--------------|-----------|
 "
 
 			# Sort by last commit date (most recent first) and add each repo to the table
@@ -774,7 +774,7 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 					pr_display="${pr_emoji} [${pr_number}](${pr_url})"
 				fi
-				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} |"
+				echo "| [\`${repo_display}\`](https://github.com/${repo}) | ${last_commit_display} | ${pr_display} |"
 			done >>"${ORG_DATA_FILE}.table"
 
 			ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")

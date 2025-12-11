@@ -143,42 +143,92 @@ is_repo_abandoned() {
 	fi
 }
 
-# Helper function to check for PRs related to x/crypto migration (open, closed, or merged)
-# Returns the LATEST (most recently updated) x/crypto-related PR
-check_xcrypto_pr() {
-	local repo="$1"
+# Helper function to extract x/crypto version from go.mod content
+# Returns the version string (e.g., v0.21.0) or "unknown"
+extract_xcrypto_version() {
+	local go_mod_content="$1"
 
-	# List all PRs (open, closed, merged) and filter for x/crypto-related keywords
-	# Include updatedAt to sort by most recent
-	local pr_search=$(gh pr list --repo "$repo" --state all --json number,title,url,state,mergedAt,updatedAt --limit 100 2>/dev/null)
+	# Look for golang.org/x/crypto version (direct dependency, not indirect)
+	# Handle both single-line require and require block formats
+	local version=$(echo "$go_mod_content" | grep 'golang.org/x/crypto' | grep -v '// indirect' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
-	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
-		echo "none"
+	if [ -n "$version" ]; then
+		echo "$version"
+	else
+		echo "unknown"
+	fi
+}
+
+# Helper function to compare semver versions
+# Returns: "current" if same, "outdated" if behind, "ahead" if ahead, "unknown" if can't compare
+compare_versions() {
+	local current="$1"
+	local latest="$2"
+
+	# Remove 'v' prefix for comparison
+	current="${current#v}"
+	latest="${latest#v}"
+
+	if [ "$current" = "$latest" ]; then
+		echo "current"
 		return
 	fi
 
-	# Filter PRs that have x/crypto-related keywords in the title
-	# Sort by updatedAt (most recent first) and take the first one
-	# Return format: #123;URL;STATUS (STATUS = open/merged/closed)
-	local pr_info=$(echo "$pr_search" | jq -r '[.[] | select(.title | test("x/crypto|golang.org/x/crypto|crypto/"; "i"))] | 
-		sort_by(.updatedAt) | reverse | .[0] | 
-		if . != null then
-			if .mergedAt != null then
-				"#" + (.number|tostring) + ";" + .url + ";merged"
-			elif .state == "OPEN" then
-				"#" + (.number|tostring) + ";" + .url + ";open"
-			else
-				"#" + (.number|tostring) + ";" + .url + ";closed"
-			end
-		else
-			empty
-		end')
+	# Split into major.minor.patch
+	IFS='.' read -r cur_major cur_minor cur_patch <<<"$current"
+	IFS='.' read -r lat_major lat_minor lat_patch <<<"$latest"
 
-	if [[ -n "$pr_info" ]]; then
-		echo "$pr_info"
-	else
-		echo "none"
+	# Compare major
+	if [ "$cur_major" -lt "$lat_major" ] 2>/dev/null; then
+		echo "outdated"
+		return
+	elif [ "$cur_major" -gt "$lat_major" ] 2>/dev/null; then
+		echo "ahead"
+		return
 	fi
+
+	# Compare minor
+	if [ "$cur_minor" -lt "$lat_minor" ] 2>/dev/null; then
+		echo "outdated"
+		return
+	elif [ "$cur_minor" -gt "$lat_minor" ] 2>/dev/null; then
+		echo "ahead"
+		return
+	fi
+
+	# Compare patch
+	if [ "$cur_patch" -lt "$lat_patch" ] 2>/dev/null; then
+		echo "outdated"
+		return
+	elif [ "$cur_patch" -gt "$lat_patch" ] 2>/dev/null; then
+		echo "ahead"
+		return
+	fi
+
+	echo "current"
+}
+
+# Helper function to check if a repo has Dependabot configured
+# Returns: "yes" if dependabot.yml/yaml exists, "no" otherwise
+check_dependabot() {
+	local repo="$1"
+	local branch="$2"
+
+	# Check for dependabot.yml
+	local yml_url="https://raw.githubusercontent.com/$repo/$branch/.github/dependabot.yml"
+	if curl -s -f -o /dev/null "$yml_url" 2>/dev/null; then
+		echo "yes"
+		return
+	fi
+
+	# Check for dependabot.yaml
+	local yaml_url="https://raw.githubusercontent.com/$repo/$branch/.github/dependabot.yaml"
+	if curl -s -f -o /dev/null "$yaml_url" 2>/dev/null; then
+		echo "yes"
+		return
+	fi
+
+	echo "no"
 }
 
 #===============================================================================
@@ -223,6 +273,20 @@ fi
 # Temporary file to track newly discovered no-go.mod repos
 NOGOMOD_TEMP=$(mktemp)
 
+#===============================================================================
+# FETCH LATEST XCRYPTO VERSION
+#===============================================================================
+
+echo "🔍 Fetching latest golang.org/x/crypto version from GitHub..."
+LATEST_XCRYPTO_VERSION=$(gh api repos/golang/crypto/tags --jq '.[0].name' 2>/dev/null || echo "unknown")
+
+if [ "$LATEST_XCRYPTO_VERSION" = "unknown" ] || [ -z "$LATEST_XCRYPTO_VERSION" ]; then
+	echo -e "${YELLOW}⚠️  Could not fetch latest version, version comparison will be skipped${RESET}"
+else
+	echo -e "${GREEN}✅ Latest golang.org/x/crypto version: ${LATEST_XCRYPTO_VERSION}${RESET}"
+fi
+echo
+
 # Tracking issue configuration
 TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking golang.org/x/crypto Direct Usage"
@@ -230,7 +294,7 @@ TRACKING_ISSUE_TITLE="Tracking golang.org/x/crypto Direct Usage"
 # Array to store repositories using x/crypto directly
 declare -a XCRYPTO_REPOS
 
-# Temporary file to store org-specific data for tracking issue (with last commit date and PR status)
+# Temporary file to store org-specific data for tracking issue (with last commit date and Dependabot status)
 ORG_DATA_FILE=$(mktemp)
 
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR GOLANG.ORG/X/CRYPTO USAGE${RESET}"
@@ -320,18 +384,34 @@ for ORG_NAME in "${ORGS[@]}"; do
 		# Check for direct dependency (exclude // indirect)
 		# Matches both: "require golang.org/x/crypto v..." and "	golang.org/x/crypto v..." (inside require block)
 		if echo "$go_mod" | grep 'golang.org/x/crypto' | grep -vq '// indirect'; then
-			echo -e "${GREEN}✓ USES crypto directly${RESET}"
+			# Extract the version being used
+			xcrypto_version=$(extract_xcrypto_version "$go_mod")
+			version_status="unknown"
+
+			if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ] && [ "$xcrypto_version" != "unknown" ]; then
+				version_status=$(compare_versions "$xcrypto_version" "$LATEST_XCRYPTO_VERSION")
+			fi
+
+			# Show version status in terminal output
+			if [ "$version_status" = "current" ]; then
+				echo -e "${GREEN}✓ USES crypto directly (${xcrypto_version} ✅ current)${RESET}"
+			elif [ "$version_status" = "outdated" ]; then
+				echo -e "${GREEN}✓ USES crypto directly${RESET} ${YELLOW}(${xcrypto_version} ⚠️  outdated)${RESET}"
+			else
+				echo -e "${GREEN}✓ USES crypto directly (${xcrypto_version})${RESET}"
+			fi
+
 			echo "$repo" >>"$temp_results"
 			XCRYPTO_REPOS+=("$repo")
 
 			# Fetch last commit date from default branch for tracking issue
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
-			# Check for PRs related to x/crypto migration
-			pr_status=$(check_xcrypto_pr "$repo")
+			# Check if repo has Dependabot configured
+			dependabot_status=$(check_dependabot "$repo" "$branch")
 
-			# Store for org-specific data: org|repo|branch|last_commit|pr_status
-			echo "$ORG_NAME|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
+			# Store for org-specific data: org|repo|branch|last_commit|dependabot_status|xcrypto_version
+			echo "$ORG_NAME|$repo|$branch|$last_commit|$dependabot_status|$xcrypto_version" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${RED}✗ NO direct usage${RESET}"
 		fi
@@ -439,18 +519,34 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		# Check for direct dependency (exclude // indirect)
 		# Matches both: "require golang.org/x/crypto v..." and "	golang.org/x/crypto v..." (inside require block)
 		if echo "$go_mod" | grep 'golang.org/x/crypto' | grep -vq '// indirect'; then
-			echo -e "${GREEN}✓ USES crypto directly${RESET}"
+			# Extract the version being used
+			xcrypto_version=$(extract_xcrypto_version "$go_mod")
+			version_status="unknown"
+
+			if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ] && [ "$xcrypto_version" != "unknown" ]; then
+				version_status=$(compare_versions "$xcrypto_version" "$LATEST_XCRYPTO_VERSION")
+			fi
+
+			# Show version status in terminal output
+			if [ "$version_status" = "current" ]; then
+				echo -e "${GREEN}✓ USES crypto directly (${xcrypto_version} ✅ current)${RESET}"
+			elif [ "$version_status" = "outdated" ]; then
+				echo -e "${GREEN}✓ USES crypto directly${RESET} ${YELLOW}(${xcrypto_version} ⚠️  outdated)${RESET}"
+			else
+				echo -e "${GREEN}✓ USES crypto directly (${xcrypto_version})${RESET}"
+			fi
+
 			echo "$repo" >>"$temp_results"
 			XCRYPTO_REPOS+=("$repo")
 
 			# Fetch last commit date from default branch for tracking issue
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
-			# Check for PRs related to x/crypto migration
-			pr_status=$(check_xcrypto_pr "$repo")
+			# Check if repo has Dependabot configured
+			dependabot_status=$(check_dependabot "$repo" "$branch")
 
-			# Store for org-specific data: org|repo|branch|last_commit|pr_status
-			echo "Individual Repositories|$repo|$branch|$last_commit|$pr_status" >>"$ORG_DATA_FILE"
+			# Store for org-specific data: org|repo|branch|last_commit|dependabot_status|xcrypto_version
+			echo "Individual Repositories|$repo|$branch|$last_commit|$dependabot_status|$xcrypto_version" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${RED}✗ NO direct usage${RESET}"
 		fi
@@ -516,19 +612,48 @@ echo
 # Display table of repositories using x/crypto directly
 if [ ${#XCRYPTO_REPOS[@]} -gt 0 ]; then
 	echo -e "${GREEN}${BOLD}📦 REPOSITORIES USING GOLANG.ORG/X/CRYPTO DIRECTLY:${RESET}"
-	echo -e "${GREEN}═══════════════════════════════════════════════════════════${RESET}"
+	echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════════════════${RESET}"
 	echo
-	printf "${BOLD}%-60s${RESET} ${BOLD}%s${RESET}\n" "Repository" "URL"
-	printf "%s\n" "─────────────────────────────────────────────────────────────────────────────────────────────"
+	if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ]; then
+		echo -e "${BLUE}📌 Latest golang.org/x/crypto version: ${BOLD}${LATEST_XCRYPTO_VERSION}${RESET}"
+		echo
+	fi
+	printf "${BOLD}%-50s %-15s %-15s %-12s${RESET}\n" "Repository" "Version" "Status" "Dependabot"
+	printf "%s\n" "────────────────────────────────────────────────────────────────────────────────────────────────"
 
-	for repo in "${XCRYPTO_REPOS[@]}"; do
-		printf "%-60s https://github.com/%s\n" "$repo" "$repo"
-	done
+	# Read from ORG_DATA_FILE to get version info
+	while IFS='|' read -r org repo branch last_commit dependabot_status xcrypto_version; do
+		# Determine version status
+		if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ] && [ "$xcrypto_version" != "unknown" ]; then
+			version_status=$(compare_versions "$xcrypto_version" "$LATEST_XCRYPTO_VERSION")
+			if [ "$version_status" = "current" ]; then
+				status_display="${GREEN}✅ Current${RESET}"
+			elif [ "$version_status" = "outdated" ]; then
+				status_display="${YELLOW}⚠️  Outdated${RESET}"
+			else
+				status_display="—"
+			fi
+		else
+			status_display="—"
+		fi
+
+		# Format dependabot status
+		if [ "$dependabot_status" = "yes" ]; then
+			dependabot_display="${GREEN}✅ Yes${RESET}"
+		else
+			dependabot_display="${RED}❌ No${RESET}"
+		fi
+
+		printf "%-50s %-15s %b %b\n" "$repo" "$xcrypto_version" "$status_display" "$dependabot_display"
+	done <"$ORG_DATA_FILE"
 
 	echo
 	echo -e "${YELLOW}${BOLD}💡 NOTE:${RESET}"
 	echo -e "${YELLOW}   These repositories directly depend on golang.org/x/crypto${RESET}"
 	echo -e "${YELLOW}   This is informational - x/crypto is a valid and maintained package${RESET}"
+	if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ]; then
+		echo -e "${YELLOW}   ⚠️  = version is behind latest (${LATEST_XCRYPTO_VERSION}), ✅ = up to date${RESET}"
+	fi
 	echo
 
 	# Generate Markdown report
@@ -559,14 +684,37 @@ if [ ${#XCRYPTO_REPOS[@]} -gt 0 ]; then
 		echo ""
 		echo "## Repositories Using golang.org/x/crypto Directly"
 		echo ""
-		echo "| # | Repository | GitHub URL |"
-		echo "|---|------------|------------|"
+		if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ]; then
+			echo "**Latest golang.org/x/crypto version:** \`${LATEST_XCRYPTO_VERSION}\`"
+			echo ""
+		fi
+		echo "| # | Repository | Version | Status | Dependabot |"
+		echo "|---|------------|---------|--------|------------|"
 
 		counter=1
-		for repo in "${XCRYPTO_REPOS[@]}"; do
-			echo "| $counter | \`$repo\` | [View on GitHub](https://github.com/$repo) |"
+		while IFS='|' read -r org repo branch last_commit dependabot_status xcrypto_version; do
+			# Determine version status
+			if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ] && [ "$xcrypto_version" != "unknown" ]; then
+				version_status=$(compare_versions "$xcrypto_version" "$LATEST_XCRYPTO_VERSION")
+				if [ "$version_status" = "current" ]; then
+					status_display="✅ Current"
+				elif [ "$version_status" = "outdated" ]; then
+					status_display="⚠️ Outdated"
+				else
+					status_display="—"
+				fi
+			else
+				status_display="—"
+			fi
+			# Format dependabot status
+			if [ "$dependabot_status" = "yes" ]; then
+				dependabot_display="✅ Yes"
+			else
+				dependabot_display="❌ No"
+			fi
+			echo "| $counter | [\`$repo\`](https://github.com/$repo) | \`$xcrypto_version\` | $status_display | $dependabot_display |"
 			counter=$((counter + 1))
-		done
+		done <"$ORG_DATA_FILE"
 
 		echo ""
 		echo "---"
@@ -635,11 +783,17 @@ echo -e "${BLUE}${BOLD}📋 Updating Central Tracking Issue${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 echo -e "${BLUE}   Building issue body with ${FOUND_COUNT} repositories using x/crypto directly...${RESET}"
 
-# Build the issue body
+# Build the issue body - include latest version if known
+LATEST_VERSION_INFO=""
+if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ]; then
+	LATEST_VERSION_INFO="**Latest Version:** \`${LATEST_XCRYPTO_VERSION}\` ([view tags](https://github.com/golang/crypto/tags))  "
+fi
+
 ISSUE_BODY="# golang.org/x/crypto Direct Usage Report
 
 **Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
 **Package:** [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto)  
+${LATEST_VERSION_INFO}
 **Status:** Actively maintained by the Go team
 
 ## Summary
@@ -651,6 +805,15 @@ ISSUE_BODY="# golang.org/x/crypto Direct Usage Report
 - **Repositories Actually Checked:** ${ACTUAL_SCANNED}
 - **Repositories Using x/crypto Directly:** ${FOUND_COUNT}
 - **Usage Percentage:** ${PERCENTAGE}
+
+### Status Legend
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ Current | Using the latest version of x/crypto |
+| ⚠️ Outdated | Using an older version, consider updating |
+| ✅ Yes (Dependabot) | Repository has Dependabot configured |
+| ❌ No (Dependabot) | Repository does not have Dependabot configured |
 
 ---
 
@@ -678,12 +841,12 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 			ISSUE_BODY+="**Repositories Using x/crypto Directly:** ${ORG_COUNT}
 
-| Repository | Branch | Last Updated | PR Status | GitHub Link |
-|------------|--------|--------------|-----------|-------------|
+| Repository | x/crypto Version | Status | Dependabot | Last Updated |
+|------------|------------------|--------|------------|--------------|
 "
 
 			# Sort by last commit date (most recent first) and add each repo to the table
-			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit pr_status; do
+			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit dependabot_status xcrypto_version; do
 				# Extract just the repo name (without org prefix)
 				repo_name="${repo##*/}"
 				# Escape pipe characters in repo names if any
@@ -695,34 +858,29 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				else
 					last_commit_display="Unknown"
 				fi
-				# Format PR status with emoji indicators
-				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
-					pr_display="—"
+
+				# Format dependabot status
+				if [ "$dependabot_status" = "yes" ]; then
+					dependabot_display="✅ Yes"
 				else
-					# Parse pr_status format: #123;https://github.com/org/repo/pull/123;status
-					pr_number=$(echo "$pr_status" | cut -d';' -f1)
-					pr_url=$(echo "$pr_status" | cut -d';' -f2)
-					pr_state=$(echo "$pr_status" | cut -d';' -f3)
-
-					# Add emoji based on PR state
-					case "$pr_state" in
-					"merged")
-						pr_emoji="✅"
-						;;
-					"open")
-						pr_emoji="🔄"
-						;;
-					"closed")
-						pr_emoji="❌"
-						;;
-					*)
-						pr_emoji=""
-						;;
-					esac
-
-					pr_display="${pr_emoji} [${pr_number}](${pr_url})"
+					dependabot_display="❌ No"
 				fi
-				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${branch}\` | ${last_commit_display} | ${pr_display} | [View Repository](https://github.com/${repo}) |"
+
+				# Determine version status for display
+				if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ] && [ "$xcrypto_version" != "unknown" ]; then
+					version_status=$(compare_versions "$xcrypto_version" "$LATEST_XCRYPTO_VERSION")
+					if [ "$version_status" = "current" ]; then
+						version_status_display="✅ Current"
+					elif [ "$version_status" = "outdated" ]; then
+						version_status_display="⚠️ Outdated"
+					else
+						version_status_display="—"
+					fi
+				else
+					version_status_display="—"
+				fi
+
+				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${xcrypto_version}\` | ${version_status_display} | ${dependabot_display} | ${last_commit_display} |"
 			done >>"${ORG_DATA_FILE}.table"
 
 			ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")
