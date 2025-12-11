@@ -116,12 +116,20 @@ SKIPPED_NOGO=0
 SKIPPED_ABANDONED=0
 SKIPPED_TRACKING_ISSUE=0
 
-# Cache files
-FORK_CACHE=".ioutil-checker-forks.cache"
-NOGO_CACHE=".ioutil-checker-nogo.cache"
-ABANDONED_CACHE=".ioutil-checker-abandoned.cache"
+# Get script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Shared cache files (used by all lookup scripts)
+CACHE_DIR="$SCRIPT_DIR/caches"
+FORK_CACHE="$CACHE_DIR/forks.txt"
+NOGO_CACHE="$CACHE_DIR/no-gomod.txt"
+ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
+# Script-specific results cache (not shared)
 RESULTS_CACHE=".ioutil-checker-results.json"
 OUTPUT_MD="ioutil-usage-report.md"
+
+# Ensure cache directory exists
+mkdir -p "$CACHE_DIR"
 
 # Inactivity threshold (in days)
 INACTIVITY_DAYS=180 # 6 months

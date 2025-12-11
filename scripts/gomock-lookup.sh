@@ -98,11 +98,18 @@ SKIPPED_FORKS=0
 SKIPPED_NOGOMOD=0
 SKIPPED_ABANDONED=0
 
-# Cache files
-FORK_CACHE=".go-version-checker-forks.cache"
-NOGOMOD_CACHE=".gomock-lookup-nogomod.cache"
-ABANDONED_CACHE=".go-version-checker-abandoned.cache"
+# Get script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Shared cache files (used by all lookup scripts)
+CACHE_DIR="$SCRIPT_DIR/caches"
+FORK_CACHE="$CACHE_DIR/forks.txt"
+NOGOMOD_CACHE="$CACHE_DIR/no-gomod.txt"
+ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
 OUTPUT_MD="gomock-usage-report.md"
+
+# Ensure cache directory exists
+mkdir -p "$CACHE_DIR"
 
 # Inactivity threshold (in days)
 INACTIVITY_DAYS=180 # 6 months

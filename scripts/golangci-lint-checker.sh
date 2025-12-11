@@ -165,11 +165,18 @@ RESET="\033[0m"
 TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking Outdated GolangCI-Lint Versions"
 
-# Cache files
-CACHE_FILE=".golangci-lint-checker.cache"
-FORK_CACHE_FILE=".golangci-lint-checker-forks.cache"
-ABANDONED_CACHE_FILE=".golangci-lint-checker-abandoned.cache"
+# Get script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Shared cache files (used by all lookup scripts)
+CACHE_DIR="$SCRIPT_DIR/caches"
+CACHE_FILE="$CACHE_DIR/no-gomod.txt"
+FORK_CACHE_FILE="$CACHE_DIR/forks.txt"
+ABANDONED_CACHE_FILE="$CACHE_DIR/abandoned.txt"
 OUTPUT_MD="golangci-lint-report.md"
+
+# Ensure cache directory exists
+mkdir -p "$CACHE_DIR"
 
 # Inactivity threshold (in days)
 INACTIVITY_DAYS=180 # 6 months

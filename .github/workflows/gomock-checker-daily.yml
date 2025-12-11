@@ -42,7 +42,6 @@ jobs:
           name: gomock-usage-report
           path: |
             gomock-usage-report.md
-            .go-version-checker-*.cache
-            .gomock-lookup-*.cache
+            scripts/caches/*.txt
           retention-days: 7
 

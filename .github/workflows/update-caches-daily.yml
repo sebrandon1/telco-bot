@@ -1,0 +1,59 @@
+name: Update Shared Caches - Daily
+
+on:
+  schedule:
+    # Run daily at 5:00 AM UTC (before other checkers run at 6:00 AM)
+    - cron: '0 5 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  update-caches:
+    if: github.repository_owner == 'redhat-best-practices-for-k8s'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      
+      - name: Run cache update script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/update-caches.sh
+          ./scripts/update-caches.sh
+      
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "Update shared caches"
+          title: "Update shared caches"
+          body: |
+            Automated update of shared cache files used by lookup scripts.
+
+            ### Cache Files Updated
+            - `scripts/caches/forks.txt` - Fork repositories
+            - `scripts/caches/abandoned.txt` - Abandoned repositories (no commits in 6+ months)
+            - `scripts/caches/no-gomod.txt` - Repositories without go.mod
+
+            ---
+            *This PR was automatically created by the update-caches-daily workflow.*
+          branch: update-shared-caches
+      
+      - name: Upload cache files as artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cache-files
+          path: scripts/caches/*.txt
+          retention-days: 7

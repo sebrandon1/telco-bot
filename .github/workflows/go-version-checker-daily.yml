@@ -40,7 +40,6 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: go-version-report
-          path: |
-            .go-version-checker*.cache
+          path: scripts/caches/*.txt
           retention-days: 7
 

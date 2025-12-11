@@ -42,7 +42,7 @@ jobs:
           name: ioutil-usage-report
           path: |
             ioutil-usage-report.md
-            .ioutil-checker-*.cache
+            scripts/caches/*.txt
             .ioutil-checker-results.json
           retention-days: 7
 

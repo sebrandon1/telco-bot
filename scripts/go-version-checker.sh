@@ -151,9 +151,16 @@ RESET="\033[0m"
 TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking Out of Date Golang Versions"
 
-# Cache files
-CACHE_FILE=".go-version-checker.cache"
-FORK_CACHE_FILE=".go-version-checker-forks.cache"
+# Get script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Shared cache files (used by all lookup scripts)
+CACHE_DIR="$SCRIPT_DIR/caches"
+CACHE_FILE="$CACHE_DIR/no-gomod.txt"
+FORK_CACHE_FILE="$CACHE_DIR/forks.txt"
+
+# Ensure cache directory exists
+mkdir -p "$CACHE_DIR"
 
 # Clear cache if requested
 if [ "$CLEAR_CACHE" = true ]; then

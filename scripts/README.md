@@ -355,15 +355,88 @@ The script provides specific instructions for updating golangci-lint in differen
 
 ## Cache Management Scripts
 
+All lookup scripts share a centralized set of cache files located in `scripts/caches/`. This improves efficiency by avoiding redundant GitHub API calls across different scripts.
+
+### Shared Cache Files
+
+The following cache files are shared across all lookup scripts:
+
+| File | Purpose |
+|------|---------|
+| `caches/forks.txt` | Fork repositories (skipped because they sync with upstream) |
+| `caches/abandoned.txt` | Repositories with no commits in 6+ months |
+| `caches/no-gomod.txt` | Repositories without a go.mod file |
+
+These files are automatically updated by the lookup scripts when they discover new entries, and can be bulk-updated using `update-caches.sh`.
+
+---
+
+### update-caches.sh
+
+**Purpose**: Comprehensive cache update script that refreshes all shared cache files in a single run. Designed for daily automated updates with optional PR creation.
+
+**Features**:
+- Scans all configured organizations in one pass
+- Updates all three cache files (forks, abandoned, no-gomod)
+- Detects changes and reports what would be updated
+- Optionally creates a pull request with changes
+- Supports dry-run mode for testing
+
+**Usage**:
+```bash
+# Update all caches
+./update-caches.sh
+
+# Update caches and create a PR if there are changes
+./update-caches.sh --create-pr
+
+# Custom inactivity threshold (default: 180 days)
+./update-caches.sh --days 365
+
+# Dry run - show what would change without making changes
+./update-caches.sh --dry-run
+
+# Show help
+./update-caches.sh --help
+```
+
+**Output**:
+- Per-organization scan results
+- Summary of cache changes (old count → new count)
+- Updated cache files in `scripts/caches/`
+- Optional pull request with changes
+
+**CI/CD Integration Example**:
+```yaml
+# .github/workflows/update-caches.yml
+name: Daily Cache Update
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6am UTC
+  workflow_dispatch:
+
+jobs:
+  update-caches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update caches and create PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/update-caches.sh --create-pr
+```
+
+---
+
 ### update-fork-cache.sh
 
-**Purpose**: Maintains a cache file of fork repositories to improve performance of other scanning scripts.
+**Purpose**: Standalone script for updating just the fork cache. Useful when you need to specifically target fork detection.
 
 **Features**:
 - Scans all configured organizations
 - Identifies forks via GitHub API
 - Optionally closes Go version issues on forks
-- Updates `.go-version-checker-forks.cache`
+- Updates `scripts/caches/forks.txt`
 
 **Usage**:
 ```bash
@@ -387,13 +460,13 @@ The script provides specific instructions for updating golangci-lint in differen
 
 ### update-abandoned-repo-cache.sh
 
-**Purpose**: Identifies and caches repositories with no commits in over a year to avoid wasting time on inactive projects.
+**Purpose**: Standalone script for updating just the abandoned repository cache.
 
 **Features**:
 - Checks last commit date on default branch
 - Configurable inactivity threshold
 - Optionally closes issues on abandoned repos
-- Updates `.go-version-checker-abandoned.cache`
+- Updates `scripts/caches/abandoned.txt`
 
 **Usage**:
 ```bash
@@ -724,20 +797,25 @@ All major scripts support `--help`:
 ```
 
 ### Cache Files
-Several scripts maintain cache files in the repository root:
-- `.go-version-checker.cache` - Non-Go repositories
-- `.go-version-checker-forks.cache` - Fork repositories
-- `.go-version-checker-abandoned.cache` - Abandoned repositories
-- `.gomock-lookup-nogomod.cache` - Repositories without go.mod
-- `.golangci-lint-checker.cache` - Non-Go repositories (golangci-lint checker)
-- `.golangci-lint-checker-forks.cache` - Fork repositories (golangci-lint checker)
-- `.golangci-lint-checker-abandoned.cache` - Abandoned repositories (golangci-lint checker)
-- `.ioutil-checker-forks.cache` - Fork repositories (ioutil checker)
-- `.ioutil-checker-nogo.cache` - Non-Go repositories (ioutil checker)
-- `.ioutil-checker-abandoned.cache` - Abandoned repositories (ioutil checker)
+All lookup scripts share centralized cache files in `scripts/caches/`:
+
+| File | Purpose |
+|------|---------|
+| `scripts/caches/forks.txt` | Fork repositories (skipped in all scans) |
+| `scripts/caches/abandoned.txt` | Repositories inactive for 6+ months |
+| `scripts/caches/no-gomod.txt` | Repositories without go.mod files |
+
+Script-specific caches:
 - `.ioutil-checker-results.json` - JSON cache of io/ioutil scan results (6-hour lifetime)
 
-These caches improve performance on subsequent runs. Use `--clear-cache` or `--force` where supported to force a full rescan.
+These shared caches improve performance across all scripts. When a script discovers a new entry (e.g., a new fork or a repo without go.mod), it automatically adds it to the shared cache for all scripts to benefit from.
+
+To refresh all caches, run:
+```bash
+./scripts/update-caches.sh
+```
+
+Use `--clear-cache` or `--force` where supported to force a full rescan ignoring cached data.
 
 ### Color-Coded Output
 All scripts use consistent color coding:
@@ -773,7 +851,7 @@ jobs:
           ./scripts/go-version-checker.sh --create-issues
 ```
 
-**Daily Abandoned Repo Cache Update**:
+**Daily Cache Update with PR Creation**:
 ```yaml
 # .github/workflows/update-caches.yml
 name: Update Repository Caches
@@ -787,17 +865,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Update fork cache
-        run: ./scripts/update-fork-cache.sh
-      - name: Update abandoned repo cache
-        run: ./scripts/update-abandoned-repo-cache.sh
-      - name: Commit cache updates
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add .go-version-checker*.cache
-          git commit -m "chore: update repository caches" || echo "No changes"
-          git push
+      - name: Update all caches and create PR if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/update-caches.sh --create-pr
 ```
 
 ---
@@ -833,8 +904,11 @@ sudo apt install gh jq
 ### Cache Issues
 If caches seem stale or corrupted:
 ```bash
-# Remove all cache files
-rm -f .go-version-checker*.cache .gomock-lookup*.cache
+# Remove all shared cache files
+rm -f scripts/caches/*.txt
+
+# Refresh all caches from GitHub
+./scripts/update-caches.sh
 
 # Or use --clear-cache flag where available
 ./scripts/go-version-checker.sh --clear-cache

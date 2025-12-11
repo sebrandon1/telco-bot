@@ -83,10 +83,17 @@ YELLOW="\033[0;33m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
+# Get script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Configuration
 ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift")
-CACHE_FILE=".go-version-checker-forks.cache"
+CACHE_DIR="$SCRIPT_DIR/caches"
+CACHE_FILE="$CACHE_DIR/forks.txt"
 LIMIT=1000
+
+# Ensure cache directory exists
+mkdir -p "$CACHE_DIR"
 
 echo -e "${BLUE}${BOLD}🔍 FINDING FORK REPOSITORIES${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
