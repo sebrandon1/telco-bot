@@ -535,9 +535,9 @@ echo
 for ORG_NAME in "${ORGS[@]}"; do
 	echo -e "${YELLOW}${BOLD}👉 Organization: ${ORG_NAME}${RESET}"
 
-	# Get all repos first
+	# Get all repos first (including fork status)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
-	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,primaryLanguage -q '.[] | select(.isArchived == false) | select(.primaryLanguage.name == "Go") | .nameWithOwner + " " + .defaultBranchRef.name')
+	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,primaryLanguage,isFork -q '.[] | select(.isArchived == false) | select(.primaryLanguage.name == "Go") | .nameWithOwner + " " + .defaultBranchRef.name + " " + (.isFork | tostring)')
 	REPO_COUNT=$(echo "$REPOS" | grep -v '^$' | wc -l | tr -d ' ')
 
 	if [ "$REPO_COUNT" -eq 0 ]; then
@@ -557,17 +557,21 @@ for ORG_NAME in "${ORGS[@]}"; do
 	# Use a separate file to store results to overcome the subshell limitation
 	temp_results=$(mktemp)
 
-	while read -r repo branch; do
+	while read -r repo branch is_fork; do
 		# Skip empty lines
 		[[ -z "$repo" ]] && continue
 
 		# Show a simple progress indicator
 		echo -ne "   📂 ${repo} on branch ${branch}... "
 
-		# Check if repo is in fork cache
-		if is_in_cache "$repo" "$FORK_CACHE"; then
+		# Check if repo is a fork (either from cache or API)
+		if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
 			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
 			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
+			# Add to cache if detected via API but not in cache yet
+			if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
+				echo "$repo" >>"$FORK_CACHE"
+			fi
 			continue
 		fi
 
@@ -710,6 +714,11 @@ if [ -f "$NOGO_TEMP" ] && [ -s "$NOGO_TEMP" ]; then
 	echo
 fi
 rm -f "$NOGO_TEMP"
+
+# Sort and deduplicate fork cache
+if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
+	sort -u "$FORK_CACHE" -o "$FORK_CACHE"
+fi
 
 # Sort and deduplicate abandoned cache
 if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then

@@ -270,10 +270,10 @@ echo
 for ORG_NAME in "${ORGS[@]}"; do
 	echo -e "${YELLOW}${BOLD}👉 Organization: ${ORG_NAME}${RESET}"
 
-	# Get all repos first
+	# Get all repos first (including fork status)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
-	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived -q '.[] | select(.isArchived == false) | .nameWithOwner + " " + .defaultBranchRef.name')
-	REPO_COUNT=$(echo "$REPOS" | wc -l | tr -d ' ')
+	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,isFork -q '.[] | select(.isArchived == false) | .nameWithOwner + " " + .defaultBranchRef.name + " " + (.isFork | tostring)')
+	REPO_COUNT=$(echo "$REPOS" | grep -v '^$' | wc -l | tr -d ' ')
 	TOTAL_REPOS=$((TOTAL_REPOS + REPO_COUNT))
 
 	echo -e "${BLUE}   Found ${REPO_COUNT} active repositories to scan${RESET}"
@@ -285,14 +285,21 @@ for ORG_NAME in "${ORGS[@]}"; do
 	# Use a separate file to store results to overcome the subshell limitation
 	temp_results=$(mktemp)
 
-	while read -r repo branch; do
+	while read -r repo branch is_fork; do
+		# Skip empty lines
+		[[ -z "$repo" ]] && continue
+
 		# Show a simple progress indicator
 		echo -ne "   📂 ${repo} on branch ${branch}... "
 
-		# Check if repo is in fork cache
-		if is_in_cache "$repo" "$FORK_CACHE"; then
+		# Check if repo is a fork (either from cache or API)
+		if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
 			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
 			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
+			# Add to cache if detected via API but not in cache yet
+			if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
+				echo "$repo" >>"$FORK_CACHE"
+			fi
 			continue
 		fi
 
@@ -399,24 +406,30 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		INDIVIDUAL_COUNT=$((INDIVIDUAL_COUNT + 1))
 
-		# Check if repo is in fork cache
-		if is_in_cache "$repo" "$FORK_CACHE"; then
-			echo -ne "   📂 ${repo}... "
-			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
-			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
-			continue
-		fi
-
-		# Get default branch for the repo
+		# Get default branch and fork status for the repo
 		echo -ne "   📂 ${repo}... "
-		branch=$(gh repo view "$repo" --json defaultBranchRef -q '.defaultBranchRef.name' 2>/dev/null)
+		repo_info=$(gh repo view "$repo" --json defaultBranchRef,isFork 2>/dev/null)
 
-		if [[ $? -ne 0 || -z "$branch" ]]; then
+		if [[ $? -ne 0 || -z "$repo_info" ]]; then
 			echo -e "${RED}✗ Failed to fetch repo info${RESET}"
 			continue
 		fi
 
+		branch=$(echo "$repo_info" | jq -r '.defaultBranchRef.name')
+		is_fork=$(echo "$repo_info" | jq -r '.isFork')
+
 		echo -ne "on branch ${branch}... "
+
+		# Check if repo is a fork (either from cache or API)
+		if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
+			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
+			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
+			# Add to cache if detected via API but not in cache yet
+			if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
+				echo "$repo" >>"$FORK_CACHE"
+			fi
+			continue
+		fi
 
 		# Check if repo is in abandoned cache
 		if is_in_cache "$repo" "$ABANDONED_CACHE"; then
@@ -508,6 +521,11 @@ if [ -f "$NOGOMOD_TEMP" ] && [ -s "$NOGOMOD_TEMP" ]; then
 	echo
 fi
 rm -f "$NOGOMOD_TEMP"
+
+# Sort and deduplicate fork cache
+if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
+	sort -u "$FORK_CACHE" -o "$FORK_CACHE"
+fi
 
 # Sort and deduplicate abandoned cache
 if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
