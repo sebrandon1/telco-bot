@@ -1,7 +1,6 @@
 openshift-kni/eapol-operator
 openshift-kni/eco-gosystem
 openshift-kni/emulated_workload_operator
-openshift-kni/k8sreporter
 openshift-kni/kkube
 openshift-kni/mixed-cpu-node-plugin
 openshift-kni/oran-hwmgr-plugin
