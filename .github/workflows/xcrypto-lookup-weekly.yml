@@ -1,9 +1,9 @@
-name: XCrypto Lookup - Daily
+name: XCrypto Lookup - Weekly Slack Report
 
 on:
   schedule:
-    # Run daily at 6:00 AM UTC (after cache updates at 5:00 AM)
-    - cron: '0 6 * * *'
+    # Run weekly on Sundays at 8:00 AM UTC
+    - cron: '0 8 * * 0'
   workflow_dispatch:
 
 jobs:
@@ -31,7 +31,10 @@ jobs:
         env:
           XCRYPTO_GITHUB_TOKEN: ${{ secrets.XCRYPTO_LOOKUP_GITHUB_TOKEN }}
 
-      - name: Run the xcrypto-lookup script
+      - name: Run the xcrypto-lookup script with Slack notification
+        env:
+          XCRYPTO_SLACK_WEBHOOK: ${{ secrets.XCRYPTO_SLACK_WEBHOOK }}
         run: |
-          echo "Running xcrypto-lookup script (daily update, no Slack notification)"
+          echo "Running xcrypto-lookup script (weekly with Slack notification)"
           ./scripts/xcrypto-lookup.sh
+

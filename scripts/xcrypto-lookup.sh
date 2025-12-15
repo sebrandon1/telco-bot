@@ -990,6 +990,29 @@ fi
 
 echo
 
+# Count outdated repos from the ORG_DATA_FILE before cleanup
+OUTDATED_COUNT=0
+if [ -f "$ORG_DATA_FILE" ]; then
+	while IFS='|' read -r org repo branch last_commit dependabot_status xcrypto_version; do
+		if [ "$LATEST_XCRYPTO_VERSION" != "unknown" ] && [ "$xcrypto_version" != "unknown" ]; then
+			version_status=$(compare_versions "$xcrypto_version" "$LATEST_XCRYPTO_VERSION")
+			if [ "$version_status" = "outdated" ]; then
+				OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
+			fi
+		fi
+	done <"$ORG_DATA_FILE"
+fi
+
+# Get the tracking issue number (either existing or newly created)
+TRACKING_ISSUE_NUMBER="${EXISTING_ISSUE:-$ISSUE_NUMBER}"
+TRACKING_ISSUE_URL="https://github.com/${TRACKING_REPO}/issues/${TRACKING_ISSUE_NUMBER}"
+
+# Send Slack notification if XCRYPTO_SLACK_WEBHOOK is set
+# This calls the separate xcrypto-slack.sh script which handles the notification
+if [ -n "$XCRYPTO_SLACK_WEBHOOK" ]; then
+	"$SCRIPT_DIR/xcrypto-slack.sh" "$TOTAL_REPOS" "${#ORGS[@]}" "$OUTDATED_COUNT" "$FOUND_COUNT" "$TRACKING_ISSUE_URL"
+fi
+
 # Cleanup temporary files
 rm -f "$ORG_DATA_FILE"
 
