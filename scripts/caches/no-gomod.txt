@@ -121,6 +121,7 @@ openshift/network-edge-tools
 openshift/network.offline_migration_sdn_to_ovnk
 openshift/networking-console-plugin
 openshift/node-problem-detector-operator
+openshift/oap-konflux-shared-configs
 openshift/oauth-templates
 openshift/object-describer
 openshift/ocp-release-payloads
