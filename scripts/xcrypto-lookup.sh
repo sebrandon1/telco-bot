@@ -65,6 +65,88 @@ YELLOW="\033[0;33m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
+#===============================================================================
+# HELP MENU
+#===============================================================================
+
+show_help() {
+	echo -e "${BOLD}GOLANG.ORG/X/CRYPTO USAGE SCANNER${RESET}"
+	echo
+	echo -e "${BOLD}USAGE:${RESET}"
+	echo "    $(basename "$0") [OPTIONS]"
+	echo
+	echo -e "${BOLD}DESCRIPTION:${RESET}"
+	echo "    Scans GitHub organizations for repositories that directly use the"
+	echo "    golang.org/x/crypto package. Identifies Go projects with direct"
+	echo "    dependencies (excluding indirect) by examining go.mod files."
+	echo
+	echo -e "${BOLD}OPTIONS:${RESET}"
+	echo "    -h, --help          Show this help message and exit"
+	echo "    --create-issues     Create tracking issues in repos using outdated x/crypto"
+	echo "                        and close issues when repos are up-to-date"
+	echo
+	echo -e "${BOLD}PREREQUISITES:${RESET}"
+	echo "    • GitHub CLI (gh) must be installed and authenticated"
+	echo "      Install: brew install gh (macOS) or https://cli.github.com/"
+	echo "      Auth: gh auth login"
+	echo
+	echo -e "${BOLD}CONFIGURATION:${RESET}"
+	echo "    Organizations scanned:"
+	echo "        redhat-best-practices-for-k8s, openshift, openshift-kni,"
+	echo "        redhat-openshift-ecosystem, redhatci"
+	echo
+	echo "    Individual repositories can be added to xcrypto-repo-list.txt"
+	echo "    (one per line, supports: owner/repo, github.com/owner/repo, or full URL)"
+	echo
+	echo -e "${BOLD}OUTPUT:${RESET}"
+	echo "    • Real-time progress and per-organization summaries"
+	echo "    • Table showing all repos using x/crypto with version status"
+	echo "    • Markdown report: xcrypto-usage-report.md"
+	echo "    • Auto-updates tracking issue in telco-bot repo"
+	echo
+	echo -e "${BOLD}CACHES:${RESET}"
+	echo "    Uses shared caches to skip known forks, abandoned repos, and"
+	echo "    repos without go.mod files. Caches are stored in:"
+	echo "        scripts/caches/"
+	echo
+	echo -e "${BOLD}SLACK NOTIFICATIONS:${RESET}"
+	echo "    Set XCRYPTO_SLACK_WEBHOOK environment variable to enable"
+	echo "    Slack notifications after each scan."
+	echo
+	echo -e "${BOLD}EXAMPLES:${RESET}"
+	echo "    # Run the scanner"
+	echo "    ./$(basename "$0")"
+	echo
+	echo "    # Run scanner and create/manage tracking issues in repos"
+	echo "    ./$(basename "$0") --create-issues"
+	echo
+	echo "    # Show this help"
+	echo "    ./$(basename "$0") -h"
+	echo
+	exit 0
+}
+
+# Feature flags
+CREATE_ISSUES=false
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-h | --help)
+		show_help
+		;;
+	--create-issues)
+		CREATE_ISSUES=true
+		;;
+	*)
+		echo -e "${RED}Unknown option: $1${RESET}"
+		echo "Use -h or --help for usage information"
+		exit 1
+		;;
+	esac
+	shift
+done
+
 # Check if GitHub CLI is installed
 echo "🔧 Checking GitHub CLI installation..."
 if ! command -v gh &>/dev/null; then
@@ -89,6 +171,7 @@ echo
 
 # List of orgs to scan
 ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci")
+# ORGS=("openshift-kni")
 
 LIMIT=1000
 FOUND_COUNT=0
@@ -96,6 +179,10 @@ TOTAL_REPOS=0
 SKIPPED_FORKS=0
 SKIPPED_NOGOMOD=0
 SKIPPED_ABANDONED=0
+ISSUES_CREATED=0
+ISSUES_UPDATED=0
+ISSUES_CLOSED=0
+ISSUES_REOPENED=0
 
 # Get script directory for relative paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -238,6 +325,420 @@ check_dependabot() {
 	echo "no"
 }
 
+# Issue title for tracking x/crypto updates
+XCRYPTO_ISSUE_TITLE="Update golang.org/x/crypto to address security vulnerabilities"
+
+# Helper function to compare if patched_version > current_version
+# Returns 0 (true) if patched > current, 1 (false) otherwise
+is_patched_version_newer() {
+	local current="$1"
+	local patched="$2"
+
+	# Remove 'v' prefix if present
+	current="${current#v}"
+	patched="${patched#v}"
+
+	# Pseudo-versions (0.0.0-timestamp-hash) are always older than real semver
+	# If patched starts with "0.0.0-", it's a pseudo-version
+	if [[ "$patched" == 0.0.0-* ]]; then
+		# Pseudo-version - these are older than any real semver like 0.1.0+
+		# If current is also a pseudo-version, compare timestamps
+		if [[ "$current" == 0.0.0-* ]]; then
+			# Compare the timestamp portion (after first dash)
+			local current_ts=$(echo "$current" | cut -d'-' -f2)
+			local patched_ts=$(echo "$patched" | cut -d'-' -f2)
+			[[ "$patched_ts" > "$current_ts" ]]
+			return $?
+		else
+			# Current is real semver, patched is pseudo-version = patched is older
+			return 1
+		fi
+	fi
+
+	# If current is pseudo-version but patched is real semver, patched is newer
+	if [[ "$current" == 0.0.0-* ]]; then
+		return 0
+	fi
+
+	# Both are real semver - compare major.minor.patch
+	IFS='.' read -r cur_major cur_minor cur_patch <<<"$current"
+	IFS='.' read -r pat_major pat_minor pat_patch <<<"$patched"
+
+	# Remove any suffix from patch (e.g., "0-rc1" -> "0")
+	cur_patch="${cur_patch%%-*}"
+	pat_patch="${pat_patch%%-*}"
+
+	# Compare major
+	if [ "${pat_major:-0}" -gt "${cur_major:-0}" ] 2>/dev/null; then
+		return 0
+	elif [ "${pat_major:-0}" -lt "${cur_major:-0}" ] 2>/dev/null; then
+		return 1
+	fi
+
+	# Compare minor
+	if [ "${pat_minor:-0}" -gt "${cur_minor:-0}" ] 2>/dev/null; then
+		return 0
+	elif [ "${pat_minor:-0}" -lt "${cur_minor:-0}" ] 2>/dev/null; then
+		return 1
+	fi
+
+	# Compare patch
+	if [ "${pat_patch:-0}" -gt "${cur_patch:-0}" ] 2>/dev/null; then
+		return 0
+	fi
+
+	return 1
+}
+
+# Helper function to fetch CVEs affecting x/crypto versions
+# Queries GitHub's Security Advisory database for golang.org/x/crypto
+# Returns a formatted list of CVEs fixed in versions AFTER the current version
+fetch_xcrypto_cves() {
+	local current_version="$1"
+
+	# Query GitHub's Security Advisory API for golang.org/x/crypto
+	# This fetches all advisories that affect the golang.org/x/crypto package
+	local advisories=$(gh api graphql -f query='
+		query {
+			securityVulnerabilities(ecosystem: GO, package: "golang.org/x/crypto", first: 50) {
+				nodes {
+					advisory {
+						ghsaId
+						summary
+						severity
+						publishedAt
+						permalink
+						identifiers {
+							type
+							value
+						}
+					}
+					vulnerableVersionRange
+					firstPatchedVersion {
+						identifier
+					}
+				}
+			}
+		}
+	' 2>/dev/null)
+
+	if [ -z "$advisories" ] || [ "$advisories" = "null" ]; then
+		echo ""
+		return
+	fi
+
+	# Parse CVEs into a temp file, then filter by version
+	local cve_lines=$(echo "$advisories" | jq -r '
+		.data.securityVulnerabilities.nodes[] |
+		select(.firstPatchedVersion.identifier != null) |
+		{
+			cve: (.advisory.identifiers[] | select(.type == "CVE") | .value) // .advisory.ghsaId,
+			ghsa: .advisory.ghsaId,
+			summary: .advisory.summary,
+			severity: .advisory.severity,
+			patched: .firstPatchedVersion.identifier,
+			range: .vulnerableVersionRange,
+			url: .advisory.permalink
+		} |
+		"\(.patched)|\(.cve // .ghsa)|\(.severity)|\(.summary)|\(.url)"
+	' 2>/dev/null | sort -u)
+
+	# Filter to only include CVEs where patched version > current version
+	local result=""
+	while IFS='|' read -r patched cve severity summary url; do
+		[ -z "$patched" ] && continue
+
+		# Only include if the fix version is newer than what the repo is using
+		if is_patched_version_newer "$current_version" "$patched"; then
+			result+="- **${cve}** (${severity}): ${summary} - Fixed in \`${patched}\` ([details](${url}))"$'\n'
+		fi
+	done <<<"$cve_lines"
+
+	echo "$result"
+}
+
+# Helper function to check if a tracking issue exists in a repo
+# Returns: issue number if exists, empty string otherwise
+find_xcrypto_issue() {
+	local repo="$1"
+
+	# Search for our specific issue title
+	gh issue list --repo "$repo" \
+		--search "in:title \"${XCRYPTO_ISSUE_TITLE}\"" \
+		--state all \
+		--json number,title,state \
+		--jq ".[] | select(.title == \"${XCRYPTO_ISSUE_TITLE}\") | .number" \
+		2>/dev/null | head -1
+}
+
+# Helper function to get the state of an issue
+get_issue_state() {
+	local repo="$1"
+	local issue_number="$2"
+
+	gh issue view "$issue_number" --repo "$repo" --json state --jq '.state' 2>/dev/null
+}
+
+# Helper function to build the issue body for x/crypto tracking issues
+# This is used by both create and update functions to ensure consistency
+build_xcrypto_issue_body() {
+	local current_version="$1"
+	local latest_version="$2"
+	local has_dependabot="$3"
+	local cve_list="$4"
+
+	local issue_body="## ⚠️ Outdated golang.org/x/crypto Dependency
+
+This repository is currently using **\`golang.org/x/crypto ${current_version}\`** but the latest version is **\`${latest_version}\`**.
+
+> **Last scanned:** $(date -u '+%Y-%m-%d %H:%M UTC')
+
+### Why Update?
+
+Keeping cryptographic dependencies up-to-date is critical for security. Newer versions often include fixes for known vulnerabilities.
+"
+
+	# Add CVE section - either list CVEs or note that there are none
+	if [ -n "$cve_list" ]; then
+		issue_body+="
+### 🔒 Security Vulnerabilities Fixed in Newer Versions
+
+The following CVEs have been addressed in versions after ${current_version}:
+
+${cve_list}
+
+"
+	else
+		issue_body+="
+### ℹ️ No Known CVEs
+
+There are no known CVEs specifically addressed between \`${current_version}\` and \`${latest_version}\`. However, staying current with the latest version is still recommended for:
+
+- Bug fixes and stability improvements
+- Compatibility with other updated dependencies
+- Proactive security posture
+
+"
+	fi
+
+	# Add Dependabot recommendation if not configured
+	if [ "$has_dependabot" = "no" ]; then
+		issue_body+="
+### 🤖 Recommendation: Enable Dependabot
+
+This repository does not appear to have Dependabot configured. We recommend enabling Dependabot to automatically keep your \`go.mod\` dependencies up-to-date and receive security alerts.
+
+To enable Dependabot, create a \`.github/dependabot.yml\` file:
+
+\`\`\`yaml
+version: 2
+updates:
+  - package-ecosystem: \"gomod\"
+    directory: \"/\"
+    schedule:
+      interval: \"weekly\"
+    open-pull-requests-limit: 10
+\`\`\`
+
+See [GitHub Dependabot documentation](https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuring-dependabot-version-updates) for more details.
+
+"
+	fi
+
+	issue_body+="
+### 📋 How to Update
+
+Run the following command to update:
+
+\`\`\`bash
+go get golang.org/x/crypto@${latest_version}
+go mod tidy
+\`\`\`
+
+Then run your tests and submit a PR with the changes.
+
+### 🔗 Central Tracking
+
+This issue is part of an organization-wide effort to keep \`golang.org/x/crypto\` dependencies up-to-date.
+
+"
+
+	# Add link to central tracking issue if available
+	if [ -n "$CENTRAL_TRACKING_ISSUE" ]; then
+		issue_body+="**See the central tracking issue for a full overview:** [${TRACKING_REPO}#${CENTRAL_TRACKING_ISSUE}](${CENTRAL_TRACKING_URL})
+"
+	else
+		issue_body+="**Central tracking:** [${TRACKING_REPO}](${CENTRAL_TRACKING_URL})
+"
+	fi
+
+	issue_body+="
+---
+
+*This issue is automatically managed by the [xcrypto-lookup.sh](https://github.com/redhat-best-practices-for-k8s/telco-bot/blob/main/scripts/xcrypto-lookup.sh) scanner.*"
+
+	echo "$issue_body"
+}
+
+# Helper function to create a tracking issue for outdated x/crypto
+create_xcrypto_issue() {
+	local repo="$1"
+	local current_version="$2"
+	local latest_version="$3"
+	local has_dependabot="$4"
+	local cve_list="$5"
+
+	local issue_body=$(build_xcrypto_issue_body "$current_version" "$latest_version" "$has_dependabot" "$cve_list")
+
+	# Create the issue
+	gh issue create --repo "$repo" \
+		--title "$XCRYPTO_ISSUE_TITLE" \
+		--body "$issue_body" \
+		2>/dev/null
+}
+
+# Helper function to update an existing tracking issue with new version/CVE info
+update_xcrypto_issue() {
+	local repo="$1"
+	local issue_number="$2"
+	local current_version="$3"
+	local latest_version="$4"
+	local has_dependabot="$5"
+	local cve_list="$6"
+
+	local issue_body=$(build_xcrypto_issue_body "$current_version" "$latest_version" "$has_dependabot" "$cve_list")
+
+	# Update the issue body
+	gh issue edit "$issue_number" --repo "$repo" \
+		--body "$issue_body" \
+		2>/dev/null
+}
+
+# Helper function to close a tracking issue (repo is now up-to-date)
+close_xcrypto_issue() {
+	local repo="$1"
+	local issue_number="$2"
+	local current_version="$3"
+
+	# Add a comment explaining why we're closing
+	gh issue comment "$issue_number" --repo "$repo" \
+		--body "✅ **Resolved**: This repository has been updated to \`golang.org/x/crypto ${current_version}\`, which is the latest version. Closing this issue.
+
+---
+*Automatically closed by [xcrypto-lookup.sh](https://github.com/redhat-best-practices-for-k8s/telco-bot/blob/main/scripts/xcrypto-lookup.sh)*" \
+		2>/dev/null
+
+	# Close the issue
+	gh issue close "$issue_number" --repo "$repo" 2>/dev/null
+}
+
+# Helper function to reopen a tracking issue (repo was updated but reverted)
+reopen_xcrypto_issue() {
+	local repo="$1"
+	local issue_number="$2"
+	local current_version="$3"
+	local latest_version="$4"
+	local cve_list="$5"
+
+	# Add a comment explaining why we're reopening
+	local reopen_comment="⚠️ **Reopened**: This repository is now using \`golang.org/x/crypto ${current_version}\`, which is outdated. The latest version is \`${latest_version}\`.
+"
+
+	if [ -n "$cve_list" ]; then
+		reopen_comment+="
+### Security Vulnerabilities to Address
+
+${cve_list}
+"
+	fi
+
+	# Add link to central tracking issue
+	if [ -n "$CENTRAL_TRACKING_ISSUE" ]; then
+		reopen_comment+="
+**Central tracking:** [${TRACKING_REPO}#${CENTRAL_TRACKING_ISSUE}](${CENTRAL_TRACKING_URL})
+"
+	fi
+
+	reopen_comment+="
+---
+*Automatically reopened by [xcrypto-lookup.sh](https://github.com/redhat-best-practices-for-k8s/telco-bot/blob/main/scripts/xcrypto-lookup.sh)*"
+
+	gh issue reopen "$issue_number" --repo "$repo" 2>/dev/null
+	gh issue comment "$issue_number" --repo "$repo" --body "$reopen_comment" 2>/dev/null
+}
+
+# Helper function to manage tracking issues for a repository
+# Creates, updates, or closes issues based on the repo's x/crypto version status
+manage_repo_issue() {
+	local repo="$1"
+	local current_version="$2"
+	local latest_version="$3"
+	local version_status="$4"
+	local has_dependabot="$5"
+
+	# Reset the global issue URL tracker
+	LAST_REPO_ISSUE_URL=""
+
+	# Skip if --create-issues was not specified
+	if [ "$CREATE_ISSUES" != "true" ]; then
+		return
+	fi
+
+	# Find existing issue
+	local existing_issue=$(find_xcrypto_issue "$repo")
+
+	if [ "$version_status" = "outdated" ]; then
+		# Fetch CVEs for this version
+		local cve_list=$(fetch_xcrypto_cves "$current_version")
+
+		if [ -n "$existing_issue" ]; then
+			# Store the issue URL
+			LAST_REPO_ISSUE_URL="https://github.com/${repo}/issues/${existing_issue}"
+
+			# Check if issue is closed
+			local issue_state=$(get_issue_state "$repo" "$existing_issue")
+			if [ "$issue_state" = "CLOSED" ]; then
+				# Reopen the issue and update its body
+				echo -ne " ${YELLOW}(reopening #${existing_issue})${RESET}"
+				if reopen_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$cve_list"; then
+					ISSUES_REOPENED=$((ISSUES_REOPENED + 1))
+				fi
+				# Also update the issue body with current info
+				update_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$has_dependabot" "$cve_list"
+			else
+				# Issue is open - update it with latest version/CVE info
+				echo -ne " ${BLUE}(updating #${existing_issue})${RESET}"
+				if update_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$has_dependabot" "$cve_list"; then
+					ISSUES_UPDATED=$((ISSUES_UPDATED + 1))
+				fi
+			fi
+		else
+			# Create new issue
+			echo -ne " ${YELLOW}(creating issue)${RESET}"
+			local new_issue=$(create_xcrypto_issue "$repo" "$current_version" "$latest_version" "$has_dependabot" "$cve_list")
+			if [ -n "$new_issue" ]; then
+				local issue_num=$(echo "$new_issue" | grep -oE '[0-9]+$')
+				echo -ne " ${GREEN}(#${issue_num})${RESET}"
+				ISSUES_CREATED=$((ISSUES_CREATED + 1))
+				# Store the issue URL
+				LAST_REPO_ISSUE_URL="https://github.com/${repo}/issues/${issue_num}"
+			fi
+		fi
+	elif [ "$version_status" = "current" ]; then
+		if [ -n "$existing_issue" ]; then
+			# Check if issue is open
+			local issue_state=$(get_issue_state "$repo" "$existing_issue")
+			if [ "$issue_state" = "OPEN" ]; then
+				# Close the issue
+				echo -ne " ${GREEN}(closing issue #${existing_issue})${RESET}"
+				if close_xcrypto_issue "$repo" "$existing_issue" "$current_version"; then
+					ISSUES_CLOSED=$((ISSUES_CLOSED + 1))
+				fi
+			fi
+		fi
+	fi
+}
+
 #===============================================================================
 # LOAD CACHES
 #===============================================================================
@@ -298,6 +799,27 @@ echo
 TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking golang.org/x/crypto Direct Usage"
 
+# Look up the central tracking issue number (needed for --create-issues to link back)
+CENTRAL_TRACKING_ISSUE=""
+if [ "$CREATE_ISSUES" = "true" ]; then
+	echo "🔗 Looking up central tracking issue in ${TRACKING_REPO}..."
+	CENTRAL_TRACKING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" \
+		--search "in:title \"${TRACKING_ISSUE_TITLE}\"" \
+		--state all \
+		--json number,title \
+		--jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" \
+		2>/dev/null | head -1)
+
+	if [ -n "$CENTRAL_TRACKING_ISSUE" ]; then
+		echo -e "${GREEN}✅ Found central tracking issue: #${CENTRAL_TRACKING_ISSUE}${RESET}"
+		CENTRAL_TRACKING_URL="https://github.com/${TRACKING_REPO}/issues/${CENTRAL_TRACKING_ISSUE}"
+	else
+		echo -e "${YELLOW}⚠️  Central tracking issue not found (will be created at end of scan)${RESET}"
+		CENTRAL_TRACKING_URL="https://github.com/${TRACKING_REPO}/issues"
+	fi
+	echo
+fi
+
 # Array to store repositories using x/crypto directly
 declare -a XCRYPTO_REPOS
 
@@ -307,6 +829,9 @@ ORG_DATA_FILE=$(mktemp)
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR GOLANG.ORG/X/CRYPTO USAGE${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
 echo -e "${YELLOW}⚠️  Note: Tracking direct dependencies on golang.org/x/crypto${RESET}"
+if [ "$CREATE_ISSUES" = "true" ]; then
+	echo -e "${GREEN}📋 Issue management: ENABLED (will create/close tracking issues)${RESET}"
+fi
 echo -e "${BLUE}───────────────────────────────────────────────────────────${RESET}"
 echo -e "${BLUE}📅 Skipping repos with no commits since: ${CUTOFF_DATE:0:10}${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
@@ -417,8 +942,11 @@ for ORG_NAME in "${ORGS[@]}"; do
 			# Check if repo has Dependabot configured
 			dependabot_status=$(check_dependabot "$repo" "$branch")
 
-			# Store for org-specific data: org|repo|branch|last_commit|dependabot_status|xcrypto_version
-			echo "$ORG_NAME|$repo|$branch|$last_commit|$dependabot_status|$xcrypto_version" >>"$ORG_DATA_FILE"
+			# Manage tracking issue in the repo (create/close based on version status)
+			manage_repo_issue "$repo" "$xcrypto_version" "$LATEST_XCRYPTO_VERSION" "$version_status" "$dependabot_status"
+
+			# Store for org-specific data: org|repo|branch|last_commit|dependabot_status|xcrypto_version|issue_url
+			echo "$ORG_NAME|$repo|$branch|$last_commit|$dependabot_status|$xcrypto_version|$LAST_REPO_ISSUE_URL" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${RED}✗ NO direct usage${RESET}"
 		fi
@@ -552,8 +1080,11 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			# Check if repo has Dependabot configured
 			dependabot_status=$(check_dependabot "$repo" "$branch")
 
-			# Store for org-specific data: org|repo|branch|last_commit|dependabot_status|xcrypto_version
-			echo "Individual Repositories|$repo|$branch|$last_commit|$dependabot_status|$xcrypto_version" >>"$ORG_DATA_FILE"
+			# Manage tracking issue in the repo (create/close based on version status)
+			manage_repo_issue "$repo" "$xcrypto_version" "$LATEST_XCRYPTO_VERSION" "$version_status" "$dependabot_status"
+
+			# Store for org-specific data: org|repo|branch|last_commit|dependabot_status|xcrypto_version|issue_url
+			echo "Individual Repositories|$repo|$branch|$last_commit|$dependabot_status|$xcrypto_version|$LAST_REPO_ISSUE_URL" >>"$ORG_DATA_FILE"
 		else
 			echo -e "${RED}✗ NO direct usage${RESET}"
 		fi
@@ -614,6 +1145,27 @@ else
 	PERCENTAGE="N/A (no repositories scanned)"
 fi
 echo -e "${BOLD}   Usage percentage:${RESET} ${PERCENTAGE}"
+
+# Show issue management summary if --create-issues was used
+if [ "$CREATE_ISSUES" = "true" ]; then
+	echo
+	echo -e "${BOLD}${BLUE}📋 ISSUE MANAGEMENT:${RESET}"
+	if [ $ISSUES_CREATED -gt 0 ]; then
+		echo -e "${BOLD}   Issues created:${RESET} ${YELLOW}${ISSUES_CREATED}${RESET}"
+	fi
+	if [ $ISSUES_UPDATED -gt 0 ]; then
+		echo -e "${BOLD}   Issues updated:${RESET} ${BLUE}${ISSUES_UPDATED}${RESET}"
+	fi
+	if [ $ISSUES_REOPENED -gt 0 ]; then
+		echo -e "${BOLD}   Issues reopened:${RESET} ${YELLOW}${ISSUES_REOPENED}${RESET}"
+	fi
+	if [ $ISSUES_CLOSED -gt 0 ]; then
+		echo -e "${BOLD}   Issues closed:${RESET} ${GREEN}${ISSUES_CLOSED}${RESET}"
+	fi
+	if [ $ISSUES_CREATED -eq 0 ] && [ $ISSUES_UPDATED -eq 0 ] && [ $ISSUES_REOPENED -eq 0 ] && [ $ISSUES_CLOSED -eq 0 ]; then
+		echo -e "${BOLD}   No issue changes needed${RESET}"
+	fi
+fi
 echo
 
 # Display table of repositories using x/crypto directly
@@ -848,12 +1400,12 @@ if [ $FOUND_COUNT -gt 0 ]; then
 
 			ISSUE_BODY+="**Repositories Using x/crypto Directly:** ${ORG_COUNT}
 
-| Repository | x/crypto Version | Status | Dependabot | Last Updated |
-|------------|------------------|--------|------------|--------------|
+| Repository | x/crypto Version | Status | Dependabot | Last Updated | Tracking Issue |
+|------------|------------------|--------|------------|--------------|----------------|
 "
 
 			# Sort by last commit date (most recent first) and add each repo to the table
-			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit dependabot_status xcrypto_version; do
+			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit dependabot_status xcrypto_version issue_url; do
 				# Extract just the repo name (without org prefix)
 				repo_name="${repo##*/}"
 				# Escape pipe characters in repo names if any
@@ -887,7 +1439,16 @@ if [ $FOUND_COUNT -gt 0 ]; then
 					version_status_display="—"
 				fi
 
-				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${xcrypto_version}\` | ${version_status_display} | ${dependabot_display} | ${last_commit_display} |"
+				# Format tracking issue link
+				if [ -n "$issue_url" ]; then
+					# Extract issue number from URL
+					issue_num=$(echo "$issue_url" | grep -oE '[0-9]+$')
+					tracking_issue_display="[#${issue_num}](${issue_url})"
+				else
+					tracking_issue_display="—"
+				fi
+
+				echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`${xcrypto_version}\` | ${version_status_display} | ${dependabot_display} | ${last_commit_display} | ${tracking_issue_display} |"
 			done >>"${ORG_DATA_FILE}.table"
 
 			ISSUE_BODY+="$(cat "${ORG_DATA_FILE}.table")

@@ -33,5 +33,5 @@ jobs:
 
       - name: Run the xcrypto-lookup script
         run: |
-          echo "Running xcrypto-lookup script (daily update, no Slack notification)"
-          ./scripts/xcrypto-lookup.sh
+          echo "Running xcrypto-lookup script (daily update with issue management, no Slack notification)"
+          ./scripts/xcrypto-lookup.sh --create-issues

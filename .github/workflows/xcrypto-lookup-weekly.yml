@@ -35,6 +35,6 @@ jobs:
         env:
           XCRYPTO_SLACK_WEBHOOK: ${{ secrets.XCRYPTO_SLACK_WEBHOOK }}
         run: |
-          echo "Running xcrypto-lookup script (weekly with Slack notification)"
-          ./scripts/xcrypto-lookup.sh
+          echo "Running xcrypto-lookup script (weekly with issue management and Slack notification)"
+          ./scripts/xcrypto-lookup.sh --create-issues
 
