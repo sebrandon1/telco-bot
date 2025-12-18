@@ -84,6 +84,8 @@ show_help() {
 	echo "    -h, --help          Show this help message and exit"
 	echo "    --create-issues     Create tracking issues in repos using outdated x/crypto"
 	echo "                        and close issues when repos are up-to-date"
+	echo "    -i, --interactive   Prompt before creating, updating, or closing issues"
+	echo "                        (requires --create-issues)"
 	echo
 	echo -e "${BOLD}PREREQUISITES:${RESET}"
 	echo "    • GitHub CLI (gh) must be installed and authenticated"
@@ -109,6 +111,11 @@ show_help() {
 	echo "    repos without go.mod files. Caches are stored in:"
 	echo "        scripts/caches/"
 	echo
+	echo -e "${BOLD}ISSUE BLOCKLIST:${RESET}"
+	echo "    Repos that don't want tracking issues can be added to:"
+	echo "        scripts/caches/xcrypto-issue-blocklist.txt"
+	echo "    Format: one repo per line (e.g., openshift/hive)"
+	echo
 	echo -e "${BOLD}SLACK NOTIFICATIONS:${RESET}"
 	echo "    Set XCRYPTO_SLACK_WEBHOOK environment variable to enable"
 	echo "    Slack notifications after each scan."
@@ -120,6 +127,9 @@ show_help() {
 	echo "    # Run scanner and create/manage tracking issues in repos"
 	echo "    ./$(basename "$0") --create-issues"
 	echo
+	echo "    # Interactive mode - prompt before each issue action"
+	echo "    ./$(basename "$0") --create-issues -i"
+	echo
 	echo "    # Show this help"
 	echo "    ./$(basename "$0") -h"
 	echo
@@ -128,6 +138,7 @@ show_help() {
 
 # Feature flags
 CREATE_ISSUES=false
+INTERACTIVE=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -138,6 +149,9 @@ while [[ $# -gt 0 ]]; do
 	--create-issues)
 		CREATE_ISSUES=true
 		;;
+	-i | --interactive)
+		INTERACTIVE=true
+		;;
 	*)
 		echo -e "${RED}Unknown option: $1${RESET}"
 		echo "Use -h or --help for usage information"
@@ -146,6 +160,12 @@ while [[ $# -gt 0 ]]; do
 	esac
 	shift
 done
+
+# Interactive mode requires --create-issues
+if [ "$INTERACTIVE" = "true" ] && [ "$CREATE_ISSUES" != "true" ]; then
+	echo -e "${YELLOW}⚠️  Warning: --interactive requires --create-issues, enabling it automatically${RESET}"
+	CREATE_ISSUES=true
+fi
 
 # Check if GitHub CLI is installed
 echo "🔧 Checking GitHub CLI installation..."
@@ -192,6 +212,7 @@ CACHE_DIR="$SCRIPT_DIR/caches"
 FORK_CACHE="$CACHE_DIR/forks.txt"
 NOGOMOD_CACHE="$CACHE_DIR/no-gomod.txt"
 ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
+XCRYPTO_ISSUE_BLOCKLIST="$CACHE_DIR/xcrypto-issue-blocklist.txt"
 OUTPUT_MD="xcrypto-usage-report.md"
 
 # Ensure cache directory exists
@@ -206,6 +227,42 @@ touch "$FORK_CACHE" "$NOGOMOD_CACHE" "$ABANDONED_CACHE"
 #===============================================================================
 # HELPER FUNCTIONS
 #===============================================================================
+
+# Helper function for interactive confirmation
+# Returns 0 (true) if user confirms, 1 (false) if declined
+# In non-interactive mode, always returns 0
+confirm_action() {
+	local action="$1"
+	local repo="$2"
+	local details="$3"
+
+	# Skip confirmation if not in interactive mode
+	if [ "$INTERACTIVE" != "true" ]; then
+		return 0
+	fi
+
+	echo
+	echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -e "${BOLD}Action:${RESET} ${action}"
+	echo -e "${BOLD}Repository:${RESET} ${repo}"
+	if [ -n "$details" ]; then
+		echo -e "${BOLD}Details:${RESET} ${details}"
+	fi
+	echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	echo -ne "${BOLD}Proceed? [y/N]: ${RESET}"
+
+	# Read from /dev/tty to get input from terminal even when stdin is redirected
+	read -r response </dev/tty
+	case "$response" in
+	[yY] | [yY][eE][sS])
+		return 0
+		;;
+	*)
+		echo -e "${BLUE}Skipped${RESET}"
+		return 1
+		;;
+	esac
+}
 
 # Helper function to check if repo is in cache
 is_in_cache() {
@@ -684,6 +741,12 @@ manage_repo_issue() {
 		return
 	fi
 
+	# Skip repos on the blocklist (repos that don't want issue notifications)
+	if [ -f "$XCRYPTO_ISSUE_BLOCKLIST" ] && grep -Fxq "$repo" "$XCRYPTO_ISSUE_BLOCKLIST" 2>/dev/null; then
+		echo -ne " ${BLUE}(blocklisted - skipping issue mgmt)${RESET}"
+		return
+	fi
+
 	# Find existing issue
 	local existing_issue=$(find_xcrypto_issue "$repo")
 
@@ -691,37 +754,66 @@ manage_repo_issue() {
 		# Fetch CVEs for this version
 		local cve_list=$(fetch_xcrypto_cves "$current_version")
 
-		if [ -n "$existing_issue" ]; then
-			# Store the issue URL
-			LAST_REPO_ISSUE_URL="https://github.com/${repo}/issues/${existing_issue}"
+		# Only create/manage issues if there are CVEs to address
+		if [ -n "$cve_list" ]; then
+			# There ARE CVEs - create or update the issue
+			if [ -n "$existing_issue" ]; then
+				# Store the issue URL
+				LAST_REPO_ISSUE_URL="https://github.com/${repo}/issues/${existing_issue}"
 
-			# Check if issue is closed
-			local issue_state=$(get_issue_state "$repo" "$existing_issue")
-			if [ "$issue_state" = "CLOSED" ]; then
-				# Reopen the issue and update its body
-				echo -ne " ${YELLOW}(reopening #${existing_issue})${RESET}"
-				if reopen_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$cve_list"; then
-					ISSUES_REOPENED=$((ISSUES_REOPENED + 1))
+				# Check if issue is closed
+				local issue_state=$(get_issue_state "$repo" "$existing_issue")
+				if [ "$issue_state" = "CLOSED" ]; then
+					# Reopen the issue and update its body
+					if confirm_action "REOPEN issue #${existing_issue}" "$repo" "CVEs found: ${current_version} → ${latest_version}"; then
+						echo -ne " ${YELLOW}(reopening #${existing_issue} - CVEs found)${RESET}"
+						if reopen_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$cve_list"; then
+							ISSUES_REOPENED=$((ISSUES_REOPENED + 1))
+						fi
+						# Also update the issue body with current info
+						update_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$has_dependabot" "$cve_list"
+					fi
+				else
+					# Issue is open - update it with latest version/CVE info
+					if confirm_action "UPDATE issue #${existing_issue}" "$repo" "Refresh with latest CVE info"; then
+						echo -ne " ${BLUE}(updating #${existing_issue})${RESET}"
+						if update_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$has_dependabot" "$cve_list"; then
+							ISSUES_UPDATED=$((ISSUES_UPDATED + 1))
+						fi
+					fi
 				fi
-				# Also update the issue body with current info
-				update_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$has_dependabot" "$cve_list"
 			else
-				# Issue is open - update it with latest version/CVE info
-				echo -ne " ${BLUE}(updating #${existing_issue})${RESET}"
-				if update_xcrypto_issue "$repo" "$existing_issue" "$current_version" "$latest_version" "$has_dependabot" "$cve_list"; then
-					ISSUES_UPDATED=$((ISSUES_UPDATED + 1))
+				# Create new issue
+				if confirm_action "CREATE new issue" "$repo" "Outdated: ${current_version} → ${latest_version} (CVEs found)"; then
+					echo -ne " ${YELLOW}(creating issue - CVEs found)${RESET}"
+					local new_issue=$(create_xcrypto_issue "$repo" "$current_version" "$latest_version" "$has_dependabot" "$cve_list")
+					if [ -n "$new_issue" ]; then
+						local issue_num=$(echo "$new_issue" | grep -oE '[0-9]+$')
+						echo -ne " ${GREEN}(#${issue_num})${RESET}"
+						ISSUES_CREATED=$((ISSUES_CREATED + 1))
+						# Store the issue URL
+						LAST_REPO_ISSUE_URL="https://github.com/${repo}/issues/${issue_num}"
+					fi
 				fi
 			fi
 		else
-			# Create new issue
-			echo -ne " ${YELLOW}(creating issue)${RESET}"
-			local new_issue=$(create_xcrypto_issue "$repo" "$current_version" "$latest_version" "$has_dependabot" "$cve_list")
-			if [ -n "$new_issue" ]; then
-				local issue_num=$(echo "$new_issue" | grep -oE '[0-9]+$')
-				echo -ne " ${GREEN}(#${issue_num})${RESET}"
-				ISSUES_CREATED=$((ISSUES_CREATED + 1))
-				# Store the issue URL
-				LAST_REPO_ISSUE_URL="https://github.com/${repo}/issues/${issue_num}"
+			# NO CVEs between versions - close any existing open issue
+			if [ -n "$existing_issue" ]; then
+				local issue_state=$(get_issue_state "$repo" "$existing_issue")
+				if [ "$issue_state" = "OPEN" ]; then
+					if confirm_action "CLOSE issue #${existing_issue}" "$repo" "No CVEs between ${current_version} and ${latest_version}"; then
+						echo -ne " ${GREEN}(closing #${existing_issue} - no CVEs)${RESET}"
+						# Close with a specific message about no CVEs
+						gh issue comment "$existing_issue" --repo "$repo" \
+							--body "✅ **Closing**: No security vulnerabilities (CVEs) are addressed between \`${current_version}\` and \`${latest_version}\`. While the version is outdated, there are no urgent security reasons to update.
+
+---
+*Automatically closed by [xcrypto-lookup.sh](https://github.com/redhat-best-practices-for-k8s/telco-bot/blob/main/scripts/xcrypto-lookup.sh)*" \
+							2>/dev/null
+						gh issue close "$existing_issue" --repo "$repo" 2>/dev/null
+						ISSUES_CLOSED=$((ISSUES_CLOSED + 1))
+					fi
+				fi
 			fi
 		fi
 	elif [ "$version_status" = "current" ]; then
@@ -729,10 +821,12 @@ manage_repo_issue() {
 			# Check if issue is open
 			local issue_state=$(get_issue_state "$repo" "$existing_issue")
 			if [ "$issue_state" = "OPEN" ]; then
-				# Close the issue
-				echo -ne " ${GREEN}(closing issue #${existing_issue})${RESET}"
-				if close_xcrypto_issue "$repo" "$existing_issue" "$current_version"; then
-					ISSUES_CLOSED=$((ISSUES_CLOSED + 1))
+				# Close the issue - repo is up to date
+				if confirm_action "CLOSE issue #${existing_issue}" "$repo" "Repository is now up to date (${current_version})"; then
+					echo -ne " ${GREEN}(closing #${existing_issue} - up to date)${RESET}"
+					if close_xcrypto_issue "$repo" "$existing_issue" "$current_version"; then
+						ISSUES_CLOSED=$((ISSUES_CLOSED + 1))
+					fi
 				fi
 			fi
 		fi

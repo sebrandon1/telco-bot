@@ -1,0 +1,5 @@
+# Repositories that have opted out of x/crypto tracking issues
+# Add one repo per line in format: owner/repo
+# Lines starting with # are comments
+openshift/hive
+
