@@ -194,8 +194,8 @@ openshift/multus-service
 openshift/nbde-tang-server
 openshift/nested-ova-ansible
 openshift/nmstate-console-plugin
-openshift/node_exporter
 openshift/node-problem-detector
+openshift/node_exporter
 openshift/oauth-proxy
 openshift/onsi-ginkgo
 openshift/open-telemetry-opentelemetry-operator
@@ -277,8 +277,6 @@ openshift/vmware-vsphere-csi-driver
 openshift/volume-data-source-validator
 openshift/zabbirc
 redhat-best-practices-for-k8s/k8s-far-edge-best-practices-guide
-redhat-best-practices-for-k8s/vz-cnf-far-edge-best-practices-guide
 redhat-openshift-ecosystem/crossIndexUpdateTool
 redhat-openshift-ecosystem/operator-pipelines-1
 redhat-openshift-ecosystem/operator-pipelines-2
-stolostron/siteconfig
