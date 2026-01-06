@@ -450,38 +450,62 @@ is_patched_version_newer() {
 # Helper function to fetch CVEs affecting x/crypto versions
 # Queries GitHub's Security Advisory database for golang.org/x/crypto
 # Returns a formatted list of CVEs fixed in versions AFTER the current version
+# Returns "FETCH_FAILED" if the API call fails after retries
 fetch_xcrypto_cves() {
 	local current_version="$1"
+	local max_retries=3
+	local retry_delay=2
+	local attempt=1
+	local advisories=""
+	local api_exit_code=0
 
-	# Query GitHub's Security Advisory API for golang.org/x/crypto
-	# This fetches all advisories that affect the golang.org/x/crypto package
-	local advisories=$(gh api graphql -f query='
-		query {
-			securityVulnerabilities(ecosystem: GO, package: "golang.org/x/crypto", first: 50) {
-				nodes {
-					advisory {
-						ghsaId
-						summary
-						severity
-						publishedAt
-						permalink
-						identifiers {
-							type
-							value
+	# Retry loop with exponential backoff
+	while [ $attempt -le $max_retries ]; do
+		# Query GitHub's Security Advisory API for golang.org/x/crypto
+		# This fetches all advisories that affect the golang.org/x/crypto package
+		advisories=$(gh api graphql -f query='
+			query {
+				securityVulnerabilities(ecosystem: GO, package: "golang.org/x/crypto", first: 50) {
+					nodes {
+						advisory {
+							ghsaId
+							summary
+							severity
+							publishedAt
+							permalink
+							identifiers {
+								type
+								value
+							}
 						}
-					}
-					vulnerableVersionRange
-					firstPatchedVersion {
-						identifier
+						vulnerableVersionRange
+						firstPatchedVersion {
+							identifier
+						}
 					}
 				}
 			}
-		}
-	' 2>/dev/null)
+		' 2>&1)
+		api_exit_code=$?
 
-	if [ -z "$advisories" ] || [ "$advisories" = "null" ]; then
-		echo ""
-		return
+		# Check if API call succeeded and returned valid data
+		if [ $api_exit_code -eq 0 ] && [ -n "$advisories" ] && [ "$advisories" != "null" ] && echo "$advisories" | grep -q "securityVulnerabilities"; then
+			break # Success, exit retry loop
+		fi
+
+		# Log retry attempt (only if not the last attempt)
+		if [ $attempt -lt $max_retries ]; then
+			echo "  (CVE fetch attempt $attempt failed, retrying in ${retry_delay}s...)" >&2
+			sleep $retry_delay
+			retry_delay=$((retry_delay * 2)) # Exponential backoff
+		fi
+		attempt=$((attempt + 1))
+	done
+
+	# After all retries, check if we have valid data
+	if [ $api_exit_code -ne 0 ] || [ -z "$advisories" ] || [ "$advisories" = "null" ] || ! echo "$advisories" | grep -q "securityVulnerabilities"; then
+		echo "FETCH_FAILED"
+		return 1
 	fi
 
 	# Parse CVEs into a temp file, then filter by version
@@ -753,6 +777,12 @@ manage_repo_issue() {
 	if [ "$version_status" = "outdated" ]; then
 		# Fetch CVEs for this version
 		local cve_list=$(fetch_xcrypto_cves "$current_version")
+
+		# Check if CVE fetch failed - don't make any issue changes if we can't verify CVE status
+		if [ "$cve_list" = "FETCH_FAILED" ]; then
+			echo -ne " ${YELLOW}(CVE fetch failed - skipping issue management)${RESET}"
+			return
+		fi
 
 		# Only create/manage issues if there are CVEs to address
 		if [ -n "$cve_list" ]; then
