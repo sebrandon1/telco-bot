@@ -29,6 +29,7 @@ openshift/elasticsearch-operator
 openshift/elasticsearch-proxy
 openshift/gatekeeper
 openshift/gatekeeper-operator
+openshift/jenkins-client-plugin
 openshift/ksan-operator
 openshift/kubevirt-csi-driver-operator
 openshift/mdns-publisher
