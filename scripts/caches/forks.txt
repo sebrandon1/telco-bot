@@ -35,6 +35,7 @@ openshift/brewpoll
 openshift/capedwarf-example-modules
 openshift/ceph-csi
 openshift/cert-manager-istio-csr
+openshift/cert-manager-trust-manager
 openshift/clam-scanner
 openshift/clamd
 openshift/clamsig-puller
