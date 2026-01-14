@@ -645,11 +645,12 @@ fetch_xcrypto_cves() {
 	fi
 
 	# Parse CVEs into a temp file, then filter by version
+	# Note: Using first() for identifiers to avoid multiplying rows when multiple CVE IDs exist
 	local cve_lines=$(echo "$advisories" | jq -r '
 		.data.securityVulnerabilities.nodes[] |
 		select(.firstPatchedVersion.identifier != null) |
 		{
-			cve: (.advisory.identifiers[] | select(.type == "CVE") | .value) // .advisory.ghsaId,
+			cve: ((.advisory.identifiers | map(select(.type == "CVE")) | first | .value) // .advisory.ghsaId),
 			ghsa: .advisory.ghsaId,
 			summary: .advisory.summary,
 			severity: .advisory.severity,
@@ -660,15 +661,31 @@ fetch_xcrypto_cves() {
 		"\(.patched)|\(.cve // .ghsa)|\(.severity)|\(.summary)|\(.url)"
 	' 2>/dev/null | sort -u)
 
-	# Check if jq parsing returned any data - if API returned data but jq parsing failed,
-	# we should treat this as a failure to avoid incorrectly closing issues
-	# The API response had nodes, so jq should have produced output
+	# Debug: Check how many nodes have patched versions
 	local node_count=$(echo "$advisories" | jq -r '.data.securityVulnerabilities.nodes | length' 2>/dev/null || echo "0")
-	if [ "$node_count" != "0" ] && [ -z "$cve_lines" ]; then
-		# API had vulnerability data but jq parsing produced nothing - this is a parsing failure
+	local patched_count=$(echo "$advisories" | jq -r '[.data.securityVulnerabilities.nodes[] | select(.firstPatchedVersion.identifier != null)] | length' 2>/dev/null || echo "0")
+	echo "  [jq DEBUG] Total nodes: $node_count, With patched version: $patched_count" >&2
+
+	# Check if jq parsing returned any data
+	if [ "$patched_count" != "0" ] && [ -z "$cve_lines" ]; then
+		# API had vulnerability data with patched versions but jq parsing produced nothing
+		echo "  [jq DEBUG] ERROR: jq parsing failed! Nodes with patches exist but cve_lines is empty" >&2
+		# Try a simpler jq query to debug
+		local simple_test=$(echo "$advisories" | jq -r '.data.securityVulnerabilities.nodes[0].advisory.ghsaId' 2>/dev/null || echo "jq_error")
+		echo "  [jq DEBUG] Simple jq test (first ghsaId): $simple_test" >&2
 		echo "FETCH_FAILED"
 		return 1
 	fi
+
+	# If no nodes have patched versions, that's valid - no CVEs to report
+	if [ "$patched_count" = "0" ]; then
+		echo "  [jq DEBUG] No CVEs have patched versions yet" >&2
+		echo ""
+		return 0
+	fi
+
+	local cve_line_count=$(echo "$cve_lines" | grep -c '|' 2>/dev/null || echo "0")
+	echo "  [jq DEBUG] Parsed $cve_line_count CVE lines" >&2
 
 	# Filter to only include CVEs where patched version > current version
 	local result=""
