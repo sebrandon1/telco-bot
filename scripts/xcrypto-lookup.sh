@@ -187,6 +187,43 @@ if ! gh auth status &>/dev/null; then
 	exit 1
 fi
 echo -e "${GREEN}✅ GitHub CLI authenticated successfully${RESET}"
+
+# Debug: Show token scopes (helps diagnose permission issues)
+if [ "$CREATE_ISSUES" = "true" ]; then
+	echo "🔑 Checking token permissions..."
+	TOKEN_SCOPES=$(gh api -i /user 2>&1 | grep -i "x-oauth-scopes:" | cut -d':' -f2- | tr -d ' ' || echo "unknown")
+	if [ -n "$TOKEN_SCOPES" ] && [ "$TOKEN_SCOPES" != "unknown" ]; then
+		echo -e "${BLUE}   Token scopes: ${TOKEN_SCOPES}${RESET}"
+	else
+		# Try alternative method for fine-grained tokens
+		TOKEN_TYPE=$(gh api /user 2>&1 | jq -r '.login' 2>/dev/null && echo "authenticated" || echo "unknown")
+		if [ "$TOKEN_TYPE" = "authenticated" ]; then
+			echo -e "${BLUE}   Token: Fine-grained PAT (scopes not visible)${RESET}"
+		else
+			echo -e "${YELLOW}   Could not determine token scopes${RESET}"
+		fi
+	fi
+
+	# Quick test of Security Advisory API access
+	echo "🔍 Testing Security Advisory API access..."
+	ADVISORY_TEST=$(gh api graphql -f query='query { securityVulnerabilities(ecosystem: GO, first: 1) { nodes { advisory { ghsaId } } } }' 2>&1)
+	ADVISORY_EXIT=$?
+	if [ $ADVISORY_EXIT -eq 0 ] && echo "$ADVISORY_TEST" | grep -q "ghsaId"; then
+		echo -e "${GREEN}   ✅ GraphQL Security Advisory API: accessible${RESET}"
+	else
+		echo -e "${YELLOW}   ⚠️  GraphQL Security Advisory API: may have issues${RESET}"
+		echo -e "${YELLOW}   Response: ${ADVISORY_TEST:0:200}${RESET}"
+	fi
+
+	REST_TEST=$(gh api "/advisories?ecosystem=go&per_page=1" 2>&1)
+	REST_EXIT=$?
+	if [ $REST_EXIT -eq 0 ] && [ "$REST_TEST" != "[]" ]; then
+		echo -e "${GREEN}   ✅ REST Advisory API: accessible${RESET}"
+	else
+		echo -e "${YELLOW}   ⚠️  REST Advisory API: may have issues${RESET}"
+		echo -e "${YELLOW}   Response: ${REST_TEST:0:200}${RESET}"
+	fi
+fi
 echo
 
 # List of orgs to scan
@@ -447,6 +484,73 @@ is_patched_version_newer() {
 	return 1
 }
 
+# Helper function to fetch CVEs affecting x/crypto versions using REST API
+# This is a fallback when GraphQL fails (e.g., due to token permissions)
+fetch_xcrypto_cves_rest() {
+	local current_version="$1"
+
+	# Query the GitHub Advisory Database REST API for golang.org/x/crypto
+	local rest_response
+	local rest_exit_code
+	rest_response=$(gh api "/advisories?ecosystem=go&affects=golang.org/x/crypto&per_page=50" 2>&1)
+	rest_exit_code=$?
+
+	if [ $rest_exit_code -ne 0 ]; then
+		echo "  [REST DEBUG] API call failed with exit code $rest_exit_code" >&2
+		echo "  [REST DEBUG] Response: ${rest_response:0:300}" >&2
+		echo "FETCH_FAILED"
+		return 1
+	fi
+
+	if [ -z "$rest_response" ] || [ "$rest_response" = "null" ] || [ "$rest_response" = "[]" ]; then
+		echo "  [REST DEBUG] API returned empty/null response" >&2
+		echo "FETCH_FAILED"
+		return 1
+	fi
+
+	# Check if response is valid JSON array
+	local item_count=$(echo "$rest_response" | jq 'length' 2>/dev/null || echo "0")
+	echo "  [REST DEBUG] Got $item_count advisories from REST API" >&2
+
+	# Parse advisories - REST API has different structure than GraphQL
+	local cve_lines=$(echo "$rest_response" | jq -r '
+		.[] |
+		select(.vulnerabilities != null) |
+		.vulnerabilities[] |
+		select(.package.name == "golang.org/x/crypto" and .first_patched_version != null) |
+		{
+			patched: .first_patched_version,
+			cve: (.cve_id // .ghsa_id),
+			severity: (.severity | ascii_upcase),
+			summary: .package.name,
+			url: ("https://github.com/advisories/" + (.ghsa_id // ""))
+		} |
+		"\(.patched)|\(.cve)|\(.severity)|golang.org/x/crypto vulnerability|\(.url)"
+	' 2>/dev/null | sort -u)
+
+	local cve_count=$(echo "$cve_lines" | grep -c '|' || echo "0")
+	echo "  [REST DEBUG] Parsed $cve_count CVE entries for x/crypto" >&2
+
+	if [ -z "$cve_lines" ]; then
+		echo ""
+		return 0
+	fi
+
+	# Filter to only include CVEs where patched version > current version
+	local result=""
+	local filtered_count=0
+	while IFS='|' read -r patched cve severity summary url; do
+		[ -z "$patched" ] && continue
+		if is_patched_version_newer "$current_version" "$patched"; then
+			result+="- **${cve}** (${severity}): ${summary} - Fixed in \`${patched}\` ([details](${url}))"$'\n'
+			filtered_count=$((filtered_count + 1))
+		fi
+	done <<<"$cve_lines"
+
+	echo "  [REST DEBUG] $filtered_count CVEs apply to version $current_version" >&2
+	echo "$result"
+}
+
 # Helper function to fetch CVEs affecting x/crypto versions
 # Queries GitHub's Security Advisory database for golang.org/x/crypto
 # Returns a formatted list of CVEs fixed in versions AFTER the current version
@@ -488,6 +592,17 @@ fetch_xcrypto_cves() {
 		' 2>&1)
 		api_exit_code=$?
 
+		# Debug logging for GraphQL response
+		if [ $attempt -eq 1 ]; then
+			echo "  [GraphQL DEBUG] Exit code: $api_exit_code" >&2
+			if [ $api_exit_code -eq 0 ]; then
+				local node_count=$(echo "$advisories" | jq '.data.securityVulnerabilities.nodes | length' 2>/dev/null || echo "parse_error")
+				echo "  [GraphQL DEBUG] Node count: $node_count" >&2
+			else
+				echo "  [GraphQL DEBUG] Response preview: ${advisories:0:300}" >&2
+			fi
+		fi
+
 		# Check if API call succeeded and returned valid data
 		if [ $api_exit_code -eq 0 ] && [ -n "$advisories" ] && [ "$advisories" != "null" ] && echo "$advisories" | grep -q "securityVulnerabilities"; then
 			break # Success, exit retry loop
@@ -495,7 +610,7 @@ fetch_xcrypto_cves() {
 
 		# Log retry attempt (only if not the last attempt)
 		if [ $attempt -lt $max_retries ]; then
-			echo "  (CVE fetch attempt $attempt failed, retrying in ${retry_delay}s...)" >&2
+			echo "  (GraphQL CVE fetch attempt $attempt failed, retrying in ${retry_delay}s...)" >&2
 			sleep $retry_delay
 			retry_delay=$((retry_delay * 2)) # Exponential backoff
 		fi
@@ -504,17 +619,26 @@ fetch_xcrypto_cves() {
 
 	# After all retries, check if we have valid data
 	if [ $api_exit_code -ne 0 ] || [ -z "$advisories" ] || [ "$advisories" = "null" ] || ! echo "$advisories" | grep -q "securityVulnerabilities"; then
-		# Log the failure reason for debugging
+		# GraphQL failed - try REST API as fallback
+		echo "  [GraphQL DEBUG] GraphQL failed after $max_retries attempts, trying REST API fallback..." >&2
+		local rest_result=$(fetch_xcrypto_cves_rest "$current_version")
+		if [ "$rest_result" != "FETCH_FAILED" ]; then
+			echo "$rest_result"
+			return 0
+		fi
+
+		# Both APIs failed - log the original GraphQL failure reason
+		echo "  [DEBUG] Both GraphQL and REST APIs failed!" >&2
 		if [ $api_exit_code -ne 0 ]; then
-			echo "  (CVE API failed with exit code $api_exit_code)" >&2
+			echo "  [DEBUG] GraphQL exit code: $api_exit_code" >&2
+			echo "  [DEBUG] GraphQL response: ${advisories:0:500}" >&2
 		elif [ -z "$advisories" ]; then
-			echo "  (CVE API returned empty response)" >&2
+			echo "  [DEBUG] GraphQL returned empty response" >&2
 		elif [ "$advisories" = "null" ]; then
-			echo "  (CVE API returned null)" >&2
+			echo "  [DEBUG] GraphQL returned null" >&2
 		elif ! echo "$advisories" | grep -q "securityVulnerabilities"; then
-			echo "  (CVE API response missing securityVulnerabilities field)" >&2
-			# Log first 200 chars of response for debugging
-			echo "  Response preview: ${advisories:0:200}" >&2
+			echo "  [DEBUG] GraphQL response missing securityVulnerabilities field" >&2
+			echo "  [DEBUG] Response: ${advisories:0:500}" >&2
 		fi
 		echo "FETCH_FAILED"
 		return 1
