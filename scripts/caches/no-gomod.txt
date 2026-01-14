@@ -6,6 +6,8 @@ openshift-kni/dpdk-base
 openshift-kni/du-test-workloads
 openshift-kni/eco-ci-cd
 openshift-kni/eco-ci-cd-private
+openshift-kni/eco-pytests
+openshift-kni/eco-validation
 openshift-kni/example-cnf
 openshift-kni/kni-enhancements
 openshift-kni/ocp-ipv6
@@ -14,6 +16,7 @@ openshift-kni/telco-ci
 openshift-kni/telco-reference
 openshift-kni/telco5g-konflux
 openshift-kni/telco5gci
+openshift-kni/testpriv556
 openshift-kni/ztp-iso
 openshift/.github
 openshift/aerogear-keycloak-metrics-spi
@@ -22,6 +25,7 @@ openshift/angular-key-value-editor
 openshift/ansible-service-broker
 openshift/api-team-toolbox
 openshift/aro-e2e
+openshift/art-bot
 openshift/art-ci-toolkit
 openshift/art-jobs
 openshift/assisted-installer-ui
@@ -52,8 +56,11 @@ openshift/confidential-compute-artifacts
 openshift/console-crontab-plugin
 openshift/console-plugin-template
 openshift/container-snapshot
+openshift/continuous-release-jobs
 openshift/contra-lib
 openshift/crd-schema-gen
+openshift/crontab-plugin
+openshift/cucushift
 openshift/dedicated-admin-operator
 openshift/distributed-tracing-qe
 openshift/docker-registry-extensions
@@ -79,6 +86,7 @@ openshift/gssapi
 openshift/hac-build-service
 openshift/hac-infra
 openshift/hac-operator
+openshift/hive-sops
 openshift/hypershift-dataplane-metrics-forwarder
 openshift/image-build-daemon
 openshift/incluster-anomaly-detection
@@ -96,6 +104,7 @@ openshift/krew-index
 openshift/kube-projects
 openshift/kubefed-operator
 openshift/kubernetes-drain
+openshift/kubernetes-mcp-server
 openshift/kubernetes-namespace-reservation
 openshift/kueue-fbc
 openshift/kuryr-kubernetes
@@ -111,9 +120,11 @@ openshift/managed-prometheus-exporter-dns
 openshift/managed-prometheus-exporter-ebs-iops-reporter
 openshift/managed-prometheus-exporter-initcontainer
 openshift/managed-prometheus-exporter-stuck-ebs-vols
+openshift/managed-release-bundle
 openshift/managed-scripts
 openshift/manila-provisioner-operator
 openshift/master-dns-operator
+openshift/mcs-ops
 openshift/monitor-project-lifecycle
 openshift/monitor-sample-app
 openshift/multus-test
@@ -135,6 +146,7 @@ openshift/oo
 openshift/oo-index
 openshift/open-service-broker-sdk
 openshift/openldap
+openshift/openshift_zabbix
 openshift/openshift-ansible
 openshift/openshift-azure
 openshift/openshift-client-python
@@ -149,12 +161,13 @@ openshift/openshift-metrics
 openshift/openshift-origin-design
 openshift/openshift-restclient-java
 openshift/openshift-restclient-python
+openshift/openshift-tests-private
 openshift/openshift-tools
 openshift/openshift-windows
 openshift/openshift.github.com
-openshift/openshift_zabbix
 openshift/operator-lib
 openshift/operator-sdk
+openshift/ops-sop
 openshift/origin-aggregated-logging
 openshift/origin-branding
 openshift/origin-ci-tool
@@ -211,8 +224,12 @@ redhat-best-practices-for-k8s/certsuite-probe
 redhat-best-practices-for-k8s/certsuite-sample-workload
 redhat-best-practices-for-k8s/custom-catalog-builder
 redhat-best-practices-for-k8s/guide
+redhat-best-practices-for-k8s/kpi-analyzer
+redhat-best-practices-for-k8s/kpi-collection-tool
+redhat-best-practices-for-k8s/operator-results-spreadsheet
 redhat-best-practices-for-k8s/operators-CNF-cert-results
 redhat-best-practices-for-k8s/parser
+redhat-best-practices-for-k8s/vz-cnf-best-practices-guide
 redhat-openshift-ecosystem/.github
 redhat-openshift-ecosystem/certification-releases
 redhat-openshift-ecosystem/certified-operators

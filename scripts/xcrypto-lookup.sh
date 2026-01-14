@@ -504,6 +504,18 @@ fetch_xcrypto_cves() {
 
 	# After all retries, check if we have valid data
 	if [ $api_exit_code -ne 0 ] || [ -z "$advisories" ] || [ "$advisories" = "null" ] || ! echo "$advisories" | grep -q "securityVulnerabilities"; then
+		# Log the failure reason for debugging
+		if [ $api_exit_code -ne 0 ]; then
+			echo "  (CVE API failed with exit code $api_exit_code)" >&2
+		elif [ -z "$advisories" ]; then
+			echo "  (CVE API returned empty response)" >&2
+		elif [ "$advisories" = "null" ]; then
+			echo "  (CVE API returned null)" >&2
+		elif ! echo "$advisories" | grep -q "securityVulnerabilities"; then
+			echo "  (CVE API response missing securityVulnerabilities field)" >&2
+			# Log first 200 chars of response for debugging
+			echo "  Response preview: ${advisories:0:200}" >&2
+		fi
 		echo "FETCH_FAILED"
 		return 1
 	fi
@@ -524,16 +536,37 @@ fetch_xcrypto_cves() {
 		"\(.patched)|\(.cve // .ghsa)|\(.severity)|\(.summary)|\(.url)"
 	' 2>/dev/null | sort -u)
 
+	# Check if jq parsing returned any data - if API returned data but jq parsing failed,
+	# we should treat this as a failure to avoid incorrectly closing issues
+	# The API response had nodes, so jq should have produced output
+	local node_count=$(echo "$advisories" | jq -r '.data.securityVulnerabilities.nodes | length' 2>/dev/null || echo "0")
+	if [ "$node_count" != "0" ] && [ -z "$cve_lines" ]; then
+		# API had vulnerability data but jq parsing produced nothing - this is a parsing failure
+		echo "FETCH_FAILED"
+		return 1
+	fi
+
 	# Filter to only include CVEs where patched version > current version
 	local result=""
+	local cve_count=0
+	local filtered_count=0
 	while IFS='|' read -r patched cve severity summary url; do
 		[ -z "$patched" ] && continue
+		cve_count=$((cve_count + 1))
 
 		# Only include if the fix version is newer than what the repo is using
 		if is_patched_version_newer "$current_version" "$patched"; then
 			result+="- **${cve}** (${severity}): ${summary} - Fixed in \`${patched}\` ([details](${url}))"$'\n'
+			filtered_count=$((filtered_count + 1))
 		fi
 	done <<<"$cve_lines"
+
+	# Safety check: if we had CVEs from the API but version filtering dropped ALL of them,
+	# and the repo version is outdated, something may be wrong with version comparison.
+	# Log this case but still return empty (no CVEs to address for this version).
+	if [ "$cve_count" -gt 0 ] && [ "$filtered_count" -eq 0 ]; then
+		echo "  (Note: ${cve_count} CVEs found but none apply to version ${current_version})" >&2
+	fi
 
 	echo "$result"
 }
@@ -827,11 +860,16 @@ manage_repo_issue() {
 				fi
 			fi
 		else
-			# NO CVEs between versions - close any existing open issue
+			# NO CVEs found between versions - but be cautious about closing
 			if [ -n "$existing_issue" ]; then
 				local issue_state=$(get_issue_state "$repo" "$existing_issue")
 				if [ "$issue_state" = "OPEN" ]; then
-					if confirm_action "CLOSE issue #${existing_issue}" "$repo" "No CVEs between ${current_version} and ${latest_version}"; then
+					# Safety check: if the existing issue body mentions CVEs, don't close it
+					# This prevents closing issues when the CVE API temporarily fails to return data
+					local issue_body=$(gh issue view "$existing_issue" --repo "$repo" --json body --jq '.body' 2>/dev/null || echo "")
+					if echo "$issue_body" | grep -q "CVE-"; then
+						echo -ne " ${YELLOW}(issue #${existing_issue} mentions CVEs - not closing, API may have returned incomplete data)${RESET}"
+					elif confirm_action "CLOSE issue #${existing_issue}" "$repo" "No CVEs between ${current_version} and ${latest_version}"; then
 						echo -ne " ${GREEN}(closing #${existing_issue} - no CVEs)${RESET}"
 						# Close with a specific message about no CVEs
 						gh issue comment "$existing_issue" --repo "$repo" \
