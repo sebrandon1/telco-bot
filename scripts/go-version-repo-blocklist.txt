@@ -149,6 +149,7 @@ openshift/hcsshim
 openshift/heapster
 openshift/heketi
 openshift/ibm-powervs-block-csi-driver
+openshift/ibm-roks-toolkit
 openshift/ibm-vpc-block-csi-driver
 openshift/ibm-vpc-node-label-updater
 openshift/image-inspector
