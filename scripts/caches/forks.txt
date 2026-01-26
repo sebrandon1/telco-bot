@@ -18,6 +18,7 @@ openshift/aws-efs-utils
 openshift/aws-encryption-provider
 openshift/aws-karpenter-provider-aws
 openshift/aws-load-balancer-controller
+openshift/aws-node-termination-handler
 openshift/aws-pod-identity-webhook
 openshift/azure-disk-csi-driver
 openshift/azure-file-csi-driver

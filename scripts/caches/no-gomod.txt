@@ -231,7 +231,6 @@ redhat-openshift-ecosystem/operator-scorecard-test-container
 redhat-openshift-ecosystem/operator-test-playbooks
 redhat-openshift-ecosystem/pipeline-metrics
 redhat-openshift-ecosystem/playground
-redhat-openshift-ecosystem/pr-workflow-tests
 redhat-openshift-ecosystem/provider-certification-plugins
 redhat-openshift-ecosystem/pullsar
 redhat-openshift-ecosystem/redhat-marketplace-operators
