@@ -53,6 +53,7 @@ openshift/console-crontab-plugin
 openshift/console-plugin-template
 openshift/container-snapshot
 openshift/contra-lib
+openshift/controller-runtime-common
 openshift/crd-schema-gen
 openshift/dedicated-admin-operator
 openshift/distributed-tracing-qe
