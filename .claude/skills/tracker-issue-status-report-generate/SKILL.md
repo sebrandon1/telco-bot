@@ -15,6 +15,7 @@ allowed-tools:
   - mcp__github__issue_read
   - mcp__github__add_issue_comment
   - mcp__github__pull_request_read
+  - Skill(highlight)
 ---
 
 # Tracker Issue Status Report Generator
@@ -179,7 +180,7 @@ gh issue comment <issue-number> --repo redhat-best-practices-for-k8s/telco-bot -
 
 ### 6. Summary Output
 
-After processing all issues, output a summary:
+After processing all issues, output a summary and store the gist URLs for the highlight:
 
 ```markdown
 ## Tracker Status Report Generation Complete
@@ -194,6 +195,36 @@ After processing all issues, output a summary:
 
 Generated: YYYY-MM-DD HH:MM:SS UTC
 ```
+
+### 7. Generate Highlight
+
+After completing all reports, automatically invoke the `/highlight` skill to create a work highlight.
+
+**Context to provide for the highlight:**
+- Number of tracking issues processed
+- Number of repositories verified
+- Key findings (critical CVEs, stale PRs, etc.)
+- Links to all generated gists
+
+**The highlight should include links to:**
+1. The tracking issues list: `https://github.com/redhat-best-practices-for-k8s/telco-bot/issues?q=is%3Aissue+is%3Aopen+Tracking`
+2. Each generated gist report
+
+**Example highlight format:**
+```markdown
+## YYYY-MM-DD: Dependency Tracking Status Reports
+
+Generated verified status reports for 5 tracking initiatives across 100+ repositories.
+Key findings: [summary of critical items]. Reports:
+[x/crypto](gist-url) | [io/ioutil](gist-url) | [golangci-lint](gist-url) | [golang/mock](gist-url) | [Go versions](gist-url)
+```
+
+**Invoke the highlight skill:**
+```
+/highlight
+```
+
+Provide the context above so the highlight accurately captures the work completed and includes all report links.
 
 ## Comment Format
 
@@ -241,6 +272,7 @@ This will:
 3. Generate detailed reports
 4. Create/update gists
 5. Post/update comments on each issue
+6. Automatically generate a `/highlight` with links to all reports
 
 ## Notes
 
