@@ -137,6 +137,7 @@ openshift/jenkins-sync-plugin
 openshift/jetstack-cert-manager
 openshift/k8s-prometheus-adapter
 openshift/kata-containers
+openshift/kedacore-http-add-on
 openshift/kedacore-keda
 openshift/keycloak-home-idp-discovery
 openshift/kube-openapi
