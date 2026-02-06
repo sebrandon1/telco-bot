@@ -1,0 +1,25 @@
+# TLS 1.3 Compliance Checker Repository Blocklist
+#
+# This file contains a list of repositories to exclude from TLS configuration
+# compliance scanning. Repositories listed here will be skipped during scanning.
+#
+# Format: One repository per line
+# Supported formats:
+#   - owner/repo
+#   - github.com/owner/repo
+#   - https://github.com/owner/repo
+#
+# Lines starting with # or // are treated as comments and ignored.
+# Empty lines are also ignored.
+#
+# Common reasons to blocklist a repository:
+#   - Repository intentionally uses InsecureSkipVerify for testing
+#   - Repository has documented exceptions for TLS configuration
+#   - Repository is a test harness or mock server
+#   - Known false positives (e.g., security scanning tools)
+#
+# Example:
+# example-org/tls-test-harness
+# github.com/another-org/mock-server
+# https://github.com/third-org/security-scanner
+

@@ -197,8 +197,8 @@ openshift/multus-service
 openshift/nbde-tang-server
 openshift/nested-ova-ansible
 openshift/nmstate-console-plugin
-openshift/node-problem-detector
 openshift/node_exporter
+openshift/node-problem-detector
 openshift/oauth-proxy
 openshift/onsi-ginkgo
 openshift/open-telemetry-opentelemetry-operator
