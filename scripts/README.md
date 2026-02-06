@@ -10,6 +10,7 @@ This directory contains automation scripts for monitoring and managing GitHub re
   - [ioutil-deprecation-checker.sh](#ioutil-deprecation-checkersh)
   - [golangci-lint-checker.sh](#golangci-lint-checkersh)
   - [xcrypto-lookup.sh](#xcrypto-lookupsh)
+  - [tls13-compliance-checker.sh](#tls13-compliance-checkersh)
   - [ubi-lookup.sh](#ubi-lookupsh)
   - [find-downstream-repos.sh](#find-downstream-repossh)
 - [Cache Management Scripts](#cache-management-scripts)
@@ -259,6 +260,82 @@ The script provides specific instructions for updating golangci-lint in differen
 - Real-time progress for each repository
 - Per-organization summary
 - Final statistics with usage percentage
+
+---
+
+### tls13-compliance-checker.sh
+
+**Purpose**: Scans GitHub organizations for repositories with TLS configuration issues and security anti-patterns. Identifies insecure settings like `InsecureSkipVerify`, weak TLS versions, and deprecated options.
+
+**Features**:
+- Dual-mode scanning: clone-based (fast, local) or API-based (for CI/CD)
+- Detects multiple TLS anti-patterns with severity classification
+- Intelligent results caching (6-hour cache lifetime)
+- Generates markdown report with remediation guide
+- Maintains central tracking issue with organization-level statistics
+- Shows fully compliant organizations and resource links
+- Caches forks, non-Go repos, and abandoned repos
+- Skips vendor, test directories, and test files
+
+**Severity Levels**:
+
+| Severity | Pattern | Risk |
+|----------|---------|------|
+| CRITICAL | `InsecureSkipVerify: true` | Disables TLS certificate verification (MITM vulnerability) |
+| HIGH | `MinVersion`/`MaxVersion` TLS 1.0 or 1.1 | Known vulnerabilities (POODLE, BEAST) |
+| MEDIUM | `MaxVersion` TLS 1.2 | Prevents TLS 1.3 negotiation |
+| INFO | `MinVersion` TLS 1.3, `PreferServerCipherSuites` | May break older clients, deprecated in Go 1.17+ |
+
+**Usage**:
+```bash
+# Scan using clone mode (default, fastest for local use)
+./tls13-compliance-checker.sh
+
+# Scan using API mode (for GitHub Actions, no cloning required)
+./tls13-compliance-checker.sh --mode api
+
+# Force refresh, ignoring cache
+./tls13-compliance-checker.sh --force
+
+# Skip updating the central tracking issue
+./tls13-compliance-checker.sh --no-tracking
+
+# Show help
+./tls13-compliance-checker.sh --help
+```
+
+**Configuration**:
+- Edit `ORGS` array in script to change scanned organizations
+- Exclude repos via `tls13-repo-blocklist.txt`
+
+**Caching**:
+The script maintains a JSON results cache (`.tls13-checker-results.json`) that stores:
+- TLS configuration findings per repository
+- Branch information for file hyperlinks
+- Last check timestamp
+
+The cache is valid for 6 hours and significantly reduces scanning time on subsequent runs. Use `--force` to bypass the cache.
+
+**Output**:
+- Real-time progress for each repository
+- Per-organization severity summary
+- `tls13-compliance-report.md` - Markdown report with remediation guide
+- Central tracking issue: "Tracking TLS Configuration Compliance"
+
+**Tracking Issue Features**:
+- Organizations Scanned table with repo counts and compliance status
+- Fully Compliant Organizations highlight section
+- Findings grouped by organization and severity
+- File hyperlinks to exact locations in source code
+- Remediation guide with code examples
+- Resource links (RFC 8446, Go crypto/tls, OWASP, Mozilla SSL config generator)
+- Security advisory references (POODLE, BEAST CVEs)
+
+**Example Output**:
+```
+org/repo on branch main... no issues found
+org/other-repo on branch main... 2 issue(s) found
+```
 
 ---
 
@@ -766,6 +843,16 @@ Optional list of individual repositories to scan for x/crypto usage.
 
 ---
 
+### tls13-repo-blocklist.txt
+
+List of repositories to exclude from TLS 1.3 compliance scanning.
+
+**Format**: Same as `go-version-repo-blocklist.txt`
+
+**Comments**: Lines starting with `#` or `//` are ignored.
+
+---
+
 ### ubi-repo-list.txt
 
 Optional list of individual repositories to scan for UBI image usage.
@@ -807,6 +894,7 @@ All lookup scripts share centralized cache files in `scripts/caches/`:
 
 Script-specific caches:
 - `.ioutil-checker-results.json` - JSON cache of io/ioutil scan results (6-hour lifetime)
+- `.tls13-checker-results.json` - JSON cache of TLS compliance scan results (6-hour lifetime)
 
 These shared caches improve performance across all scripts. When a script discovers a new entry (e.g., a new fork or a repo without go.mod), it automatically adds it to the shared cache for all scripts to benefit from.
 
