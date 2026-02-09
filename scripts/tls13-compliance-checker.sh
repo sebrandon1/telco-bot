@@ -59,6 +59,28 @@
 #     Risk: None - this is just dead code that should be cleaned up.
 #     Action: Remove the setting (it has no effect in Go 1.17+).
 #
+#   INFO - CurvePreferences
+#     What: Explicit elliptic curve configuration in TLS settings
+#     Why:  Indicates awareness of curve negotiation. Relevant for PQC readiness
+#           as post-quantum key exchange (e.g., X25519MLKEM768) will use this field.
+#     Risk: None currently. Track for future PQC migration.
+#     Action: Review curve selections for PQC readiness when ML-KEM support lands.
+#
+#   INFO - Hardcoded tls.Config
+#     What: Direct tls.Config{} struct initialization
+#     Why:  May bypass centralized TLS profile management (e.g., OpenShift
+#           TLSSecurityProfile). Repos consuming TLSSecurityProfile are filtered out.
+#     Risk: Inconsistent TLS settings across the platform if not using API server
+#           TLS profiles.
+#     Action: Prefer consuming TLSSecurityProfile from API server config.
+#
+#   INFO - PQC/ML-KEM patterns
+#     What: Post-Quantum Cryptography adoption indicators (ML-KEM/Kyber)
+#     Why:  Tracks early adoption of NIST-standardized PQC algorithms. These repos
+#           are ahead of the curve in preparing for quantum-safe cryptography.
+#     Risk: None - positive indicator of PQC readiness.
+#     Action: No action needed. These repos are already preparing for PQC migration.
+#
 # PREREQUISITES:
 #   1. GitHub CLI (gh) must be installed on your system
 #      - Install: https://cli.github.com/
@@ -162,8 +184,8 @@ show_help() {
 	echo "    CRITICAL    InsecureSkipVerify: true (MITM vulnerability)"
 	echo "    HIGH        TLS 1.0/1.1 MinVersion or MaxVersion"
 	echo "    MEDIUM      MaxVersion capped at TLS 1.2"
-	echo "    INFO        MinVersion forced to TLS 1.3, or PreferServerCipherSuites"
-	echo "                (deprecated in Go 1.17+)"
+	echo "    INFO        MinVersion forced to TLS 1.3, PreferServerCipherSuites,"
+	echo "                CurvePreferences, Hardcoded tls.Config, PQC/ML-KEM patterns"
 	echo
 	echo -e "${BOLD}PREREQUISITES:${RESET}"
 	echo "    - GitHub CLI (gh) must be installed and authenticated"
@@ -360,6 +382,9 @@ TLS_PATTERNS=(
 	"MEDIUM|MaxVersion TLS 1.2|Prevents TLS 1.3 negotiation|MaxVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS12"
 	"INFO|MinVersion TLS 1.3|Forces TLS 1.3 (may break older clients)|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS13"
 	"INFO|PreferServerCipherSuites|Deprecated in Go 1.17+ (ignored)|PreferServerCipherSuites[[:space:]]*:[[:space:]]*true"
+	"INFO|CurvePreferences|Explicit curve configuration (PQC readiness indicator)|CurvePreferences[[:space:]]*[:=]"
+	"INFO|Hardcoded tls.Config|Hardcoded TLS config (review for API server TLS profile adherence)|tls\.Config[[:space:]]*\{"
+	"INFO|PQC/ML-KEM patterns|Post-Quantum Cryptography adoption (ML-KEM)|(X25519MLKEM|MLKEM768|mlkem768|crypto/mlkem|NewDecapsulationKey|NewEncapsulationKey)"
 )
 
 #===============================================================================
@@ -534,6 +559,50 @@ scan_local_repo() {
 		fi
 	done
 
+	# Two-pass filter: reduce noise from "Hardcoded tls.Config" findings
+	# If a file that matches tls.Config{} also references TLSSecurityProfile,
+	# it's consuming centralized config and doing the right thing.
+	local has_tls_config=$(echo "$findings" | jq '[.[] | select(.pattern == "Hardcoded tls.Config")] | length')
+	if [ "$has_tls_config" -gt 0 ]; then
+		# Check if repo has any TLSSecurityProfile references
+		local profile_files=$(grep -rl --include="*.go" "TLSSecurityProfile" "$repo_path" \
+			--exclude-dir=vendor --exclude-dir=testdata --exclude-dir=mocks \
+			--exclude-dir=.git --exclude-dir=test --exclude-dir=tests \
+			--exclude-dir=e2e --exclude-dir=testing --exclude-dir=mock \
+			--exclude-dir=fakes --exclude-dir=fixtures \
+			--exclude="*_test.go" 2>/dev/null)
+
+		if [ -n "$profile_files" ]; then
+			# Get the files from the tls.Config finding
+			local tls_config_files=$(echo "$findings" | jq -r '.[] | select(.pattern == "Hardcoded tls.Config") | .files')
+			local filtered_files=""
+			local filtered_count=0
+
+			IFS=',' read -ra file_array <<<"$tls_config_files"
+			for f in "${file_array[@]}"; do
+				local full_path="$repo_path/$f"
+				# Keep the file only if it does NOT reference TLSSecurityProfile
+				if ! grep -q "TLSSecurityProfile" "$full_path" 2>/dev/null; then
+					if [ -n "$filtered_files" ]; then
+						filtered_files="$filtered_files,$f"
+					else
+						filtered_files="$f"
+					fi
+					filtered_count=$((filtered_count + 1))
+				fi
+			done
+
+			if [ "$filtered_count" -eq 0 ]; then
+				# All files reference TLSSecurityProfile - remove finding entirely
+				findings=$(echo "$findings" | jq '[.[] | select(.pattern != "Hardcoded tls.Config")]')
+			elif [ "$filtered_count" -lt "$(echo "$tls_config_files" | tr ',' '\n' | wc -l | tr -d ' ')" ]; then
+				# Some files filtered out - update the finding
+				findings=$(echo "$findings" | jq --arg f "$filtered_files" --arg c "$filtered_count" \
+					'[.[] | if .pattern == "Hardcoded tls.Config" then .files = $f | .count = ($c|tonumber) else . end]')
+			fi
+		fi
+	fi
+
 	echo "$findings"
 }
 
@@ -596,6 +665,9 @@ API_PATTERNS=(
 	"MEDIUM|MaxVersion TLS 1.2|Prevents TLS 1.3 negotiation|MaxVersion VersionTLS12|MaxVersion.*VersionTLS12"
 	"INFO|MinVersion TLS 1.3|Forces TLS 1.3 (may break older clients)|MinVersion VersionTLS13|MinVersion.*VersionTLS13"
 	"INFO|PreferServerCipherSuites|Deprecated in Go 1.17+ (ignored)|PreferServerCipherSuites true|PreferServerCipherSuites[[:space:]]*:[[:space:]]*true"
+	"INFO|CurvePreferences|Explicit curve configuration (PQC readiness indicator)|CurvePreferences|CurvePreferences[[:space:]]*[:=]"
+	"INFO|Hardcoded tls.Config|Hardcoded TLS config (review for API server TLS profile adherence)|tls.Config|tls\.Config[[:space:]]*\{"
+	"INFO|PQC/ML-KEM patterns|Post-Quantum Cryptography adoption (ML-KEM)|MLKEM OR mlkem OR X25519MLKEM|(X25519MLKEM|MLKEM768|mlkem768|crypto/mlkem|NewDecapsulationKey|NewEncapsulationKey)"
 )
 
 # Rate limiting for API mode (requests per minute limit)
@@ -817,7 +889,7 @@ declare -a INFO_FINDINGS
 echo -e "${BLUE}${BOLD}SCANNING REPOSITORIES FOR TLS CONFIGURATION ISSUES${RESET}"
 echo -e "${BLUE}=======================================================${RESET}"
 echo -e "${YELLOW}Checking for: InsecureSkipVerify, weak TLS versions,${RESET}"
-echo -e "${YELLOW}              MaxVersion caps, and deprecated options${RESET}"
+echo -e "${YELLOW}              MaxVersion caps, deprecated options, and PQC readiness${RESET}"
 echo -e "${BLUE}-------------------------------------------------------${RESET}"
 echo
 
@@ -1064,6 +1136,9 @@ echo "Generating markdown report: $OUTPUT_MD"
 	echo "| HIGH | TLS 1.0/1.1 MinVersion or MaxVersion - Known vulnerabilities (POODLE, BEAST) |"
 	echo "| MEDIUM | MaxVersion capped at TLS 1.2 - Prevents TLS 1.3 negotiation |"
 	echo "| INFO | Forced TLS 1.3, or PreferServerCipherSuites (deprecated in Go 1.17+) |"
+	echo "| INFO | CurvePreferences - Explicit curve config (PQC readiness indicator) |"
+	echo "| INFO | Hardcoded tls.Config - Direct TLS config (review for TLS profile adherence) |"
+	echo "| INFO | PQC/ML-KEM patterns - Post-Quantum Cryptography adoption indicators |"
 	echo ""
 
 	if [ "$REPOS_WITH_ISSUES" -gt 0 ]; then
@@ -1165,6 +1240,49 @@ JQEOF
 		echo "- **PreferServerCipherSuites**: Deprecated in Go 1.17, now a no-op"
 		echo "- **MinVersion: TLS 1.3**: May break compatibility with older clients"
 		echo ""
+		echo "### Info: CurvePreferences"
+		echo ""
+		echo "Explicit curve configuration indicates awareness of TLS key exchange parameters."
+		echo "This is a PQC readiness indicator -- when ML-KEM support is available, this field"
+		echo "will be used to enable post-quantum key exchange."
+		echo ""
+		echo "\`\`\`go"
+		echo "// Current: explicit curve preferences"
+		echo "tlsConfig := &tls.Config{"
+		echo "    CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},"
+		echo "}"
+		echo ""
+		echo "// Future: add PQC hybrid key exchange when available"
+		echo "tlsConfig := &tls.Config{"
+		echo "    CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519, tls.CurveP256},"
+		echo "}"
+		echo "\`\`\`"
+		echo ""
+		echo "### Info: Hardcoded tls.Config"
+		echo ""
+		echo "Direct \`tls.Config{}\` initialization may bypass centralized TLS profile management."
+		echo "Where possible, consume the API server's \`TLSSecurityProfile\` to ensure consistent"
+		echo "TLS settings across the platform."
+		echo ""
+		echo "\`\`\`go"
+		echo "// Preferred: consume TLSSecurityProfile from API server config"
+		echo "profile := apiServerConfig.Spec.TLSSecurityProfile"
+		echo "tlsConfig := crypto.TLSConfigFromProfile(profile)"
+		echo "\`\`\`"
+		echo ""
+		echo "Repos that already reference \`TLSSecurityProfile\` are automatically filtered from this finding."
+		echo ""
+		echo "### Info: PQC/ML-KEM Patterns"
+		echo ""
+		echo "These repos are adopting Post-Quantum Cryptography (PQC) using NIST-standardized ML-KEM"
+		echo "(Module-Lattice-Based Key Encapsulation, FIPS 203). Key identifiers:"
+		echo ""
+		echo "- \`X25519MLKEM768\` - Hybrid post-quantum key exchange"
+		echo "- \`crypto/mlkem\` - Go standard library PQC package"
+		echo "- \`NewDecapsulationKey\` / \`NewEncapsulationKey\` - ML-KEM key operations"
+		echo ""
+		echo "No action needed -- these repos are ahead of the curve in PQC readiness."
+		echo ""
 	else
 		echo "## All Clear!"
 		echo ""
@@ -1207,6 +1325,9 @@ if [ "$UPDATE_TRACKING" = true ]; then
 | HIGH | TLS 1.0/1.1 MinVersion or MaxVersion - Known vulnerabilities |
 | MEDIUM | MaxVersion capped at TLS 1.2 - Prevents TLS 1.3 |
 | INFO | Forced TLS 1.3, or PreferServerCipherSuites (deprecated) |
+| INFO | CurvePreferences - Explicit curve config (PQC readiness indicator) |
+| INFO | Hardcoded tls.Config - Direct TLS config (review for TLS profile adherence) |
+| INFO | PQC/ML-KEM patterns - Post-Quantum Cryptography adoption indicators |
 
 ---
 
@@ -1337,6 +1458,20 @@ tlsConfig := &tls.Config{
 }
 \`\`\`
 
+### PQC Readiness
+
+**CurvePreferences:** Explicit curve configuration is a PQC readiness indicator. When ML-KEM support is available in Go, add \`X25519MLKEM768\` as the preferred curve:
+
+\`\`\`go
+tlsConfig := &tls.Config{
+    CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519, tls.CurveP256},
+}
+\`\`\`
+
+**Hardcoded tls.Config:** Where possible, consume the API server's \`TLSSecurityProfile\` for consistent TLS settings across the platform. Repos already referencing \`TLSSecurityProfile\` are filtered from this finding.
+
+**PQC/ML-KEM:** Repos using ML-KEM identifiers (\`X25519MLKEM768\`, \`crypto/mlkem\`, \`NewDecapsulationKey\`, \`NewEncapsulationKey\`) are already preparing for post-quantum cryptography. No action needed.
+
 "
 	else
 		ISSUE_BODY+="## All Clear!
@@ -1359,6 +1494,12 @@ No TLS configuration issues found in any scanned repositories.
 **Security Advisories:**
 - [POODLE Attack (CVE-2014-3566)](https://nvd.nist.gov/vuln/detail/CVE-2014-3566) - SSL 3.0/TLS 1.0 vulnerability
 - [BEAST Attack (CVE-2011-3389)](https://nvd.nist.gov/vuln/detail/CVE-2011-3389) - TLS 1.0 vulnerability
+
+**Post-Quantum Cryptography (PQC):**
+- [NIST FIPS 203 - ML-KEM Standard](https://csrc.nist.gov/pubs/fips/203/final) - Module-Lattice-Based Key Encapsulation
+- [Go crypto/mlkem Package](https://pkg.go.dev/crypto/mlkem) - Go standard library PQC support
+- [Kubernetes PQC Blog Post](https://kubernetes.io/blog/2025/04/14/kubernetes-pqc-guidelines/) - Post-Quantum Cryptography guidelines
+- [OpenShift TLSSecurityProfile Docs](https://docs.openshift.com/container-platform/latest/security/tls-security-profiles.html) - Centralized TLS profile management
 
 ---
 
