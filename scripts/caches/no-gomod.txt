@@ -115,6 +115,8 @@ openshift/managed-prometheus-exporter-stuck-ebs-vols
 openshift/managed-scripts
 openshift/manila-provisioner-operator
 openshift/master-dns-operator
+openshift/mcp-lifecycle-operator
+openshift/mcs-ops
 openshift/monitor-project-lifecycle
 openshift/monitor-sample-app
 openshift/multus-test
@@ -136,6 +138,7 @@ openshift/oo
 openshift/oo-index
 openshift/open-service-broker-sdk
 openshift/openldap
+openshift/openshift_zabbix
 openshift/openshift-ansible
 openshift/openshift-azure
 openshift/openshift-client-python
@@ -150,10 +153,10 @@ openshift/openshift-metrics
 openshift/openshift-origin-design
 openshift/openshift-restclient-java
 openshift/openshift-restclient-python
+openshift/openshift-tests-private
 openshift/openshift-tools
 openshift/openshift-windows
 openshift/openshift.github.com
-openshift/openshift_zabbix
 openshift/operator-lib
 openshift/operator-sdk
 openshift/origin-aggregated-logging
@@ -212,6 +215,8 @@ redhat-best-practices-for-k8s/certsuite-probe
 redhat-best-practices-for-k8s/certsuite-sample-workload
 redhat-best-practices-for-k8s/custom-catalog-builder
 redhat-best-practices-for-k8s/guide
+redhat-best-practices-for-k8s/kpi-analyzer
+redhat-best-practices-for-k8s/operator-results-spreadsheet
 redhat-best-practices-for-k8s/operators-CNF-cert-results
 redhat-best-practices-for-k8s/parser
 redhat-openshift-ecosystem/.github
