@@ -43,7 +43,7 @@ jobs:
           ./scripts/tls13-compliance-checker.sh --mode api
 
       - name: Upload compliance report as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: tls-compliance-report
           path: tls13-compliance-report.md
