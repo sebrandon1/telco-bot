@@ -641,9 +641,18 @@ verify_match_in_file() {
 	local filepath="$3"
 	local verify_regex="$4"
 
-	# Fetch file content
+	# Fetch file content with timeout and retry
 	local raw_url="https://raw.githubusercontent.com/$repo/$branch/$filepath"
-	local content=$(curl -s -f "$raw_url" 2>/dev/null)
+	local content=""
+	local retries=2
+
+	for ((i = 1; i <= retries; i++)); do
+		content=$(curl -s -f --max-time 30 "$raw_url" 2>/dev/null)
+		if [ -n "$content" ]; then
+			break
+		fi
+		sleep 1
+	done
 
 	if [ -z "$content" ]; then
 		return 1
@@ -666,18 +675,19 @@ scan_repo_api() {
 	for pattern_def in "${API_PATTERNS[@]}"; do
 		IFS='|' read -r severity pattern description search_query verify_regex <<<"$pattern_def"
 
-		# Build exclusion query for GitHub Code Search
-		# Note: GitHub Code Search has limited NOT path: support
-		local exclusions="NOT path:vendor NOT path:testdata NOT path:mocks NOT path:mock NOT path:test NOT path:tests NOT path:e2e NOT path:testing NOT path:fakes NOT path:fixtures"
-
 		# Rate limit
 		api_rate_limit
 
-		# Search using gh search code
-		local search_result=$(gh search code "$search_query" \
+		# Build full query with exclusions
+		# GitHub Code Search supports NOT path: syntax in the query string
+		# Note: We exclude common test/vendor directories directly in the search
+		local full_query="${search_query} NOT path:vendor/ NOT path:testdata/ NOT path:mocks/ NOT path:mock/ NOT path:test/ NOT path:tests/ NOT path:e2e/ NOT path:testing/ NOT path:fakes/ NOT path:fixtures/"
+
+		# Search using gh search code with exclusions in the query
+		local search_result=$(gh search code "$full_query" \
 			--repo "$repo" \
 			--extension go \
-			--limit 50 \
+			--limit 100 \
 			--json path 2>/dev/null)
 
 		if [ -z "$search_result" ] || [ "$search_result" = "[]" ] || [ "$search_result" = "null" ]; then
@@ -698,7 +708,7 @@ scan_repo_api() {
 		while IFS= read -r filepath; do
 			[ -z "$filepath" ] && continue
 
-			# Check exclusions
+			# Double-check exclusions (in case API didn't filter properly)
 			if should_exclude_path "$filepath"; then
 				continue
 			fi
