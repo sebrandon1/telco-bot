@@ -1,85 +1,53 @@
 #!/bin/bash
 
 #===============================================================================
-# TLS 1.3 COMPLIANCE CHECKER (Clone-Based)
+# TLS 1.3 COMPLIANCE CHECKER (Multi-Language)
 #===============================================================================
 #
 # DESCRIPTION:
 #   This script scans GitHub organizations for repositories with TLS
-#   configuration issues and anti-patterns. It identifies Go projects with
-#   insecure TLS settings, weak version constraints, and deprecated options.
+#   configuration issues and anti-patterns across multiple languages:
+#   Go, Python, Node.js (JavaScript/TypeScript), and C++.
+#
+#   It identifies insecure TLS settings, weak version constraints,
+#   disabled certificate verification, and deprecated options.
 #
 #   Uses local clones for fast, rate-limit-free scanning instead of GitHub
 #   Code Search API.
 #
 # SEVERITY LEVELS:
 #
-#   CRITICAL - InsecureSkipVerify: true
-#     What: Disables TLS certificate verification entirely
-#     Why:  Allows man-in-the-middle (MITM) attacks - an attacker can intercept
-#           and modify traffic without detection. The client accepts ANY certificate,
-#           including self-signed or expired ones from malicious actors.
-#     Risk: Complete loss of TLS security guarantees. Credentials, tokens, and
-#           sensitive data can be stolen or modified in transit.
-#     Action: Remove InsecureSkipVerify or set to false. Use proper CA certificates.
+#   CRITICAL - Certificate verification disabled
+#     Go:     InsecureSkipVerify: true
+#     Python: verify=False, ssl.CERT_NONE, _create_unverified_context,
+#             check_hostname = False
+#     Node:   rejectUnauthorized: false, NODE_TLS_REJECT_UNAUTHORIZED
+#     C++:    SSL_CTX_set_verify(SSL_VERIFY_NONE), SSL_set_verify(SSL_VERIFY_NONE)
+#     Risk:   MITM attacks - complete loss of TLS security guarantees
+#     Action: Use proper CA certificates and enable verification
 #
-#   HIGH - MinVersion/MaxVersion set to TLS 1.0 or 1.1
-#     What: Allows or requires connections using TLS 1.0 or 1.1
-#     Why:  These protocol versions have known cryptographic vulnerabilities:
-#           - POODLE (Padding Oracle On Downgraded Legacy Encryption)
-#           - BEAST (Browser Exploit Against SSL/TLS)
-#           - Weak cipher suites with no forward secrecy
-#     Risk: Attackers can exploit protocol weaknesses to decrypt traffic.
-#           Many compliance standards (PCI-DSS, HIPAA) prohibit TLS < 1.2.
-#     Action: Set MinVersion to tls.VersionTLS12 or higher.
+#   HIGH - TLS 1.0/1.1 protocol versions
+#     Go:     MinVersion/MaxVersion set to VersionTLS10/VersionTLS11
+#     Python: PROTOCOL_TLSv1, PROTOCOL_TLSv1_1
+#     Node:   TLSv1_method, TLSv1_1_method, minVersion TLSv1/TLSv1.1
+#     C++:    TLS1_VERSION, TLS1_1_VERSION, SSLv3_method, TLSv1_method
+#     Risk:   POODLE, BEAST vulnerabilities; PCI-DSS/HIPAA non-compliance
+#     Action: Use TLS 1.2 minimum
 #
-#   MEDIUM - MaxVersion set to TLS 1.2
-#     What: Caps the maximum TLS version, preventing TLS 1.3 negotiation
-#     Why:  TLS 1.3 provides significant security improvements:
-#           - Removes obsolete/insecure cryptographic algorithms
-#           - Faster handshake (1-RTT vs 2-RTT)
-#           - Better forward secrecy guarantees
-#           - Encrypted handshake (hides more metadata)
-#     Risk: Missing security benefits of TLS 1.3. May indicate outdated code
-#           or unnecessary compatibility constraints.
-#     Action: Remove MaxVersion unless there's a specific compatibility need.
+#   MEDIUM - MaxVersion capped at TLS 1.2
+#     Go:     MaxVersion = VersionTLS12
+#     Python: maximum_version = TLSv1_2
+#     Node:   maxVersion: TLSv1.2
+#     C++:    SSL_CTX_set_max_proto_version(TLS1_2_VERSION)
+#     Risk:   Prevents TLS 1.3 negotiation and its security improvements
+#     Action: Remove version cap unless there's a specific compatibility need
 #
-#   INFO - MinVersion set to TLS 1.3
-#     What: Requires TLS 1.3 for all connections (rejects TLS 1.2)
-#     Why:  While TLS 1.3 is more secure, requiring it may break compatibility
-#           with older clients, load balancers, or proxies that only support TLS 1.2.
-#     Risk: Connection failures with legacy systems. Generally acceptable for
-#           modern internal services.
-#     Action: Verify all clients support TLS 1.3 before requiring it.
-#
-#   INFO - PreferServerCipherSuites: true
-#     What: Instructs server to prefer its own cipher suite order over client's
-#     Why:  Deprecated in Go 1.17+ and now a no-op. Go's crypto/tls automatically
-#           selects the most secure mutually-supported cipher suite.
-#     Risk: None - this is just dead code that should be cleaned up.
-#     Action: Remove the setting (it has no effect in Go 1.17+).
-#
-#   INFO - CurvePreferences
-#     What: Explicit elliptic curve configuration in TLS settings
-#     Why:  Indicates awareness of curve negotiation. Relevant for PQC readiness
-#           as post-quantum key exchange (e.g., X25519MLKEM768) will use this field.
-#     Risk: None currently. Track for future PQC migration.
-#     Action: Review curve selections for PQC readiness when ML-KEM support lands.
-#
-#   INFO - Hardcoded tls.Config
-#     What: Direct tls.Config{} struct initialization
-#     Why:  May bypass centralized TLS profile management (e.g., OpenShift
-#           TLSSecurityProfile). Repos consuming TLSSecurityProfile are filtered out.
-#     Risk: Inconsistent TLS settings across the platform if not using API server
-#           TLS profiles.
-#     Action: Prefer consuming TLSSecurityProfile from API server config.
-#
-#   INFO - PQC/ML-KEM patterns
-#     What: Post-Quantum Cryptography adoption indicators (ML-KEM/Kyber)
-#     Why:  Tracks early adoption of NIST-standardized PQC algorithms. These repos
-#           are ahead of the curve in preparing for quantum-safe cryptography.
-#     Risk: None - positive indicator of PQC readiness.
-#     Action: No action needed. These repos are already preparing for PQC migration.
+#   INFO - Informational findings
+#     - MinVersion forced to TLS 1.3 (may break older clients)
+#     - Go: PreferServerCipherSuites (deprecated in Go 1.17+)
+#     - Go: CurvePreferences (PQC readiness indicator)
+#     - Go: Hardcoded tls.Config (review for TLS profile adherence)
+#     - Go: PQC/ML-KEM patterns (post-quantum cryptography adoption)
 #
 # PREREQUISITES:
 #   1. GitHub CLI (gh) must be installed on your system
@@ -146,7 +114,8 @@
 # LIMITATIONS:
 #   - Limited to 1000 repositories per organization
 #   - Excludes vendor/, testdata/, mocks/, test/, tests/, e2e/, testing/,
-#     mock/, fakes/, fixtures/, and *_test.go files
+#     mock/, fakes/, fixtures/, node_modules/, __pycache__/, venv/, and
+#     language-specific test files
 #===============================================================================
 
 # Terminal colors
@@ -162,15 +131,16 @@ RESET="\033[0m"
 #===============================================================================
 
 show_help() {
-	echo -e "${BOLD}TLS 1.3 COMPLIANCE CHECKER (Clone-Based)${RESET}"
+	echo -e "${BOLD}TLS 1.3 COMPLIANCE CHECKER (Multi-Language)${RESET}"
 	echo
 	echo -e "${BOLD}USAGE:${RESET}"
 	echo "    $(basename "$0") [OPTIONS]"
 	echo
 	echo -e "${BOLD}DESCRIPTION:${RESET}"
 	echo "    Scans GitHub organizations for repositories with TLS configuration"
-	echo "    issues and anti-patterns. Identifies insecure settings like"
-	echo "    InsecureSkipVerify, weak TLS versions, and deprecated options."
+	echo "    issues and anti-patterns across Go, Python, Node.js, and C++."
+	echo "    Identifies certificate verification bypass, weak TLS versions,"
+	echo "    and deprecated options."
 	echo
 	echo -e "${BOLD}OPTIONS:${RESET}"
 	echo "    -h, --help          Show this help message and exit"
@@ -181,11 +151,10 @@ show_help() {
 	echo "                        - api: Use GitHub Code Search (for CI/CD)"
 	echo
 	echo -e "${BOLD}SEVERITY LEVELS:${RESET}"
-	echo "    CRITICAL    InsecureSkipVerify: true (MITM vulnerability)"
-	echo "    HIGH        TLS 1.0/1.1 MinVersion or MaxVersion"
+	echo "    CRITICAL    Certificate verification disabled (MITM vulnerability)"
+	echo "    HIGH        TLS 1.0/1.1 protocol version usage"
 	echo "    MEDIUM      MaxVersion capped at TLS 1.2"
-	echo "    INFO        MinVersion forced to TLS 1.3, PreferServerCipherSuites,"
-	echo "                CurvePreferences, Hardcoded tls.Config, PQC/ML-KEM patterns"
+	echo "    INFO        TLS 1.3 forced, deprecated options, PQC readiness"
 	echo
 	echo -e "${BOLD}PREREQUISITES:${RESET}"
 	echo "    - GitHub CLI (gh) must be installed and authenticated"
@@ -208,8 +177,8 @@ show_help() {
 	echo "    - Auto-updates tracking issue in telco-bot repo"
 	echo
 	echo -e "${BOLD}CACHES:${RESET}"
-	echo "    Uses shared caches to skip known forks, abandoned repos, and"
-	echo "    repos without go.mod files. Caches are stored in:"
+	echo "    Uses shared caches to skip known abandoned repos."
+	echo "    Caches are stored in:"
 	echo "        scripts/caches/"
 	echo
 	echo -e "${BOLD}LOCAL REPOS (clone mode only):${RESET}"
@@ -318,13 +287,11 @@ echo
 
 # List of orgs to scan (can be overridden by environment variable)
 if [ -z "${ORGS+x}" ]; then
-	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci")
+	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "red-hat-storage")
 fi
 
 LIMIT=1000
 TOTAL_REPOS=0
-SKIPPED_FORKS=0
-SKIPPED_NOGOMOD=0
 SKIPPED_ABANDONED=0
 SKIPPED_BLOCKLIST=0
 CLONE_FAILURES=0
@@ -340,8 +307,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Shared cache files (used by all lookup scripts)
 CACHE_DIR="$SCRIPT_DIR/caches"
-FORK_CACHE="$CACHE_DIR/forks.txt"
-NOGOMOD_CACHE="$CACHE_DIR/no-gomod.txt"
 ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
 BLOCKLIST_FILE="$SCRIPT_DIR/tls13-repo-blocklist.txt"
 OUTPUT_MD="tls13-compliance-report.md"
@@ -365,15 +330,19 @@ INACTIVITY_DAYS=180 # 6 months
 CACHE_MAX_AGE=$((6 * 60 * 60))
 
 # Create empty cache files if they don't exist
-touch "$FORK_CACHE" "$NOGOMOD_CACHE" "$ABANDONED_CACHE"
+touch "$ABANDONED_CACHE"
 
 # Tracking issue configuration
 TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking TLS Configuration Compliance"
 
-# TLS patterns to search for
+# Supported languages for scanning
+SUPPORTED_LANGUAGES=("Go" "C++" "JavaScript" "TypeScript" "Python")
+
+# TLS patterns to search for, organized by language
 # Format: "severity|pattern_name|description|regex"
-TLS_PATTERNS=(
+
+GO_TLS_PATTERNS=(
 	"CRITICAL|InsecureSkipVerify: true|Disables TLS certificate verification (MITM vulnerability)|InsecureSkipVerify[[:space:]]*:[[:space:]]*true"
 	"HIGH|MinVersion TLS 1.0|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS10"
 	"HIGH|MinVersion TLS 1.1|TLS 1.1 has known vulnerabilities|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS11"
@@ -386,6 +355,83 @@ TLS_PATTERNS=(
 	"INFO|Hardcoded tls.Config|Hardcoded TLS config (review for API server TLS profile adherence)|tls\.Config[[:space:]]*\{"
 	"INFO|PQC/ML-KEM patterns|Post-Quantum Cryptography adoption (ML-KEM)|(X25519MLKEM|MLKEM768|mlkem768|crypto/mlkem|NewDecapsulationKey|NewEncapsulationKey)"
 )
+
+PYTHON_TLS_PATTERNS=(
+	"CRITICAL|verify=False|Disables TLS certificate verification (MITM vulnerability)|verify[[:space:]]*=[[:space:]]*False"
+	"CRITICAL|ssl.CERT_NONE|Disables certificate verification via ssl module|CERT_NONE"
+	"CRITICAL|_create_unverified_context|Creates SSL context without certificate verification|_create_unverified_context"
+	"CRITICAL|check_hostname = False|Disables hostname verification|check_hostname[[:space:]]*=[[:space:]]*False"
+	"HIGH|PROTOCOL_TLSv1 (1.0)|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|PROTOCOL_TLSv1[^_]"
+	"HIGH|PROTOCOL_TLSv1_1|TLS 1.1 has known vulnerabilities|PROTOCOL_TLSv1_1"
+	"MEDIUM|maximum_version TLSv1_2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maximum_version.*TLSv1_2"
+	"INFO|minimum_version TLSv1_3|Forces TLS 1.3 (may break older clients)|minimum_version.*TLSv1_3"
+)
+
+NODE_TLS_PATTERNS=(
+	"CRITICAL|rejectUnauthorized: false|Disables TLS certificate verification (MITM vulnerability)|rejectUnauthorized[[:space:]]*:[[:space:]]*false"
+	"CRITICAL|NODE_TLS_REJECT_UNAUTHORIZED|Disables TLS verification via environment variable|NODE_TLS_REJECT_UNAUTHORIZED"
+	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLSv1_method"
+	"HIGH|TLSv1_1_method|TLS 1.1 has known vulnerabilities|TLSv1_1_method"
+	"HIGH|minVersion TLS 1.0/1.1|Allows weak TLS versions|minVersion.*TLSv1[^.3]"
+	"MEDIUM|maxVersion TLSv1.2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maxVersion.*TLSv1\.2"
+	"INFO|minVersion TLSv1.3|Forces TLS 1.3 (may break older clients)|minVersion.*TLSv1\.3"
+)
+
+CPP_TLS_PATTERNS=(
+	"CRITICAL|SSL_CTX_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_CTX_set_verify.*SSL_VERIFY_NONE"
+	"CRITICAL|SSL_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_set_verify.*SSL_VERIFY_NONE"
+	"HIGH|TLS1_VERSION|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLS1_VERSION[^_]"
+	"HIGH|TLS1_1_VERSION|TLS 1.1 has known vulnerabilities|TLS1_1_VERSION"
+	"HIGH|SSLv3_method|SSL 3.0 has known vulnerabilities (POODLE)|SSLv3_method"
+	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities|TLSv1_method[^_]"
+	"MEDIUM|SSL_CTX_set_max_proto_version TLS1_2|Caps maximum TLS version at 1.2|SSL_CTX_set_max_proto_version.*TLS1_2_VERSION"
+	"INFO|SSL_CTX_set_min_proto_version TLS1_3|Forces TLS 1.3 (may break older clients)|SSL_CTX_set_min_proto_version.*TLS1_3_VERSION"
+)
+
+# Get TLS patterns for a given language
+get_patterns_for_language() {
+	local lang="$1"
+	case "$lang" in
+	Go) printf '%s\n' "${GO_TLS_PATTERNS[@]}" ;;
+	Python) printf '%s\n' "${PYTHON_TLS_PATTERNS[@]}" ;;
+	JavaScript | TypeScript) printf '%s\n' "${NODE_TLS_PATTERNS[@]}" ;;
+	C++) printf '%s\n' "${CPP_TLS_PATTERNS[@]}" ;;
+	esac
+}
+
+# Build grep --include flags for a language
+build_include_flags() {
+	local lang="$1"
+	case "$lang" in
+	Go) echo "--include=*.go" ;;
+	Python) echo "--include=*.py" ;;
+	JavaScript) echo "--include=*.js --include=*.mjs" ;;
+	TypeScript) echo "--include=*.ts --include=*.mts" ;;
+	C++) echo "--include=*.cpp --include=*.cc --include=*.cxx --include=*.h --include=*.hpp" ;;
+	esac
+}
+
+# Build grep --exclude flags for test files by language
+build_test_exclude_flags() {
+	local lang="$1"
+	case "$lang" in
+	Go) echo "--exclude=*_test.go" ;;
+	Python) echo "--exclude=*_test.py --exclude=test_*.py --exclude=conftest.py" ;;
+	JavaScript) echo "--exclude=*.test.js --exclude=*.spec.js --exclude=*.test.mjs --exclude=*.spec.mjs" ;;
+	TypeScript) echo "--exclude=*.test.ts --exclude=*.spec.ts --exclude=*.test.mts --exclude=*.spec.mts" ;;
+	C++) echo "--exclude=*_test.cpp --exclude=*_test.cc" ;;
+	esac
+}
+
+# Build extra --exclude-dir flags for language-specific directories
+build_extra_exclude_dirs() {
+	local lang="$1"
+	case "$lang" in
+	JavaScript | TypeScript) echo "--exclude-dir=node_modules" ;;
+	Python) echo "--exclude-dir=__pycache__ --exclude-dir=venv --exclude-dir=.venv" ;;
+	*) echo "" ;;
+	esac
+}
 
 #===============================================================================
 # HELPER FUNCTIONS
@@ -534,18 +580,26 @@ ensure_repo_updated() {
 scan_local_repo() {
 	local repo_path="$1"
 	local branch="$2"
+	local language="$3"
 	local findings="[]"
 
-	for pattern_def in "${TLS_PATTERNS[@]}"; do
+	# Build language-specific grep flags
+	local include_flags=$(build_include_flags "$language")
+	local test_exclude_flags=$(build_test_exclude_flags "$language")
+	local extra_exclude_dirs=$(build_extra_exclude_dirs "$language")
+
+	while IFS= read -r pattern_def; do
+		[ -z "$pattern_def" ] && continue
 		IFS='|' read -r severity pattern description regex <<<"$pattern_def"
 
 		# Search for pattern, excluding vendor, testdata, mocks, test directories, and test files
-		local matches=$(grep -rn --include="*.go" -E "$regex" "$repo_path" \
+		# shellcheck disable=SC2086
+		local matches=$(grep -rn $include_flags -E "$regex" "$repo_path" \
 			--exclude-dir=vendor --exclude-dir=testdata --exclude-dir=mocks \
 			--exclude-dir=.git --exclude-dir=test --exclude-dir=tests \
 			--exclude-dir=e2e --exclude-dir=testing --exclude-dir=mock \
 			--exclude-dir=fakes --exclude-dir=fixtures \
-			--exclude="*_test.go" 2>/dev/null)
+			$test_exclude_flags $extra_exclude_dirs 2>/dev/null)
 
 		if [ -n "$matches" ]; then
 			# Extract file paths (relative to repo) and count
@@ -557,48 +611,50 @@ scan_local_repo() {
 				--arg d "$description" --arg f "$files" --arg c "$count" --arg b "$branch" \
 				'. + [{severity: $s, pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
 		fi
-	done
+	done < <(get_patterns_for_language "$language")
 
-	# Two-pass filter: reduce noise from "Hardcoded tls.Config" findings
+	# Two-pass filter for Go: reduce noise from "Hardcoded tls.Config" findings
 	# If a file that matches tls.Config{} also references TLSSecurityProfile,
 	# it's consuming centralized config and doing the right thing.
-	local has_tls_config=$(echo "$findings" | jq '[.[] | select(.pattern == "Hardcoded tls.Config")] | length')
-	if [ "$has_tls_config" -gt 0 ]; then
-		# Check if repo has any TLSSecurityProfile references
-		local profile_files=$(grep -rl --include="*.go" "TLSSecurityProfile" "$repo_path" \
-			--exclude-dir=vendor --exclude-dir=testdata --exclude-dir=mocks \
-			--exclude-dir=.git --exclude-dir=test --exclude-dir=tests \
-			--exclude-dir=e2e --exclude-dir=testing --exclude-dir=mock \
-			--exclude-dir=fakes --exclude-dir=fixtures \
-			--exclude="*_test.go" 2>/dev/null)
+	if [ "$language" = "Go" ]; then
+		local has_tls_config=$(echo "$findings" | jq '[.[] | select(.pattern == "Hardcoded tls.Config")] | length')
+		if [ "$has_tls_config" -gt 0 ]; then
+			# Check if repo has any TLSSecurityProfile references
+			local profile_files=$(grep -rl --include="*.go" "TLSSecurityProfile" "$repo_path" \
+				--exclude-dir=vendor --exclude-dir=testdata --exclude-dir=mocks \
+				--exclude-dir=.git --exclude-dir=test --exclude-dir=tests \
+				--exclude-dir=e2e --exclude-dir=testing --exclude-dir=mock \
+				--exclude-dir=fakes --exclude-dir=fixtures \
+				--exclude="*_test.go" 2>/dev/null)
 
-		if [ -n "$profile_files" ]; then
-			# Get the files from the tls.Config finding
-			local tls_config_files=$(echo "$findings" | jq -r '.[] | select(.pattern == "Hardcoded tls.Config") | .files')
-			local filtered_files=""
-			local filtered_count=0
+			if [ -n "$profile_files" ]; then
+				# Get the files from the tls.Config finding
+				local tls_config_files=$(echo "$findings" | jq -r '.[] | select(.pattern == "Hardcoded tls.Config") | .files')
+				local filtered_files=""
+				local filtered_count=0
 
-			IFS=',' read -ra file_array <<<"$tls_config_files"
-			for f in "${file_array[@]}"; do
-				local full_path="$repo_path/$f"
-				# Keep the file only if it does NOT reference TLSSecurityProfile
-				if ! grep -q "TLSSecurityProfile" "$full_path" 2>/dev/null; then
-					if [ -n "$filtered_files" ]; then
-						filtered_files="$filtered_files,$f"
-					else
-						filtered_files="$f"
+				IFS=',' read -ra file_array <<<"$tls_config_files"
+				for f in "${file_array[@]}"; do
+					local full_path="$repo_path/$f"
+					# Keep the file only if it does NOT reference TLSSecurityProfile
+					if ! grep -q "TLSSecurityProfile" "$full_path" 2>/dev/null; then
+						if [ -n "$filtered_files" ]; then
+							filtered_files="$filtered_files,$f"
+						else
+							filtered_files="$f"
+						fi
+						filtered_count=$((filtered_count + 1))
 					fi
-					filtered_count=$((filtered_count + 1))
-				fi
-			done
+				done
 
-			if [ "$filtered_count" -eq 0 ]; then
-				# All files reference TLSSecurityProfile - remove finding entirely
-				findings=$(echo "$findings" | jq '[.[] | select(.pattern != "Hardcoded tls.Config")]')
-			elif [ "$filtered_count" -lt "$(echo "$tls_config_files" | tr ',' '\n' | wc -l | tr -d ' ')" ]; then
-				# Some files filtered out - update the finding
-				findings=$(echo "$findings" | jq --arg f "$filtered_files" --arg c "$filtered_count" \
-					'[.[] | if .pattern == "Hardcoded tls.Config" then .files = $f | .count = ($c|tonumber) else . end]')
+				if [ "$filtered_count" -eq 0 ]; then
+					# All files reference TLSSecurityProfile - remove finding entirely
+					findings=$(echo "$findings" | jq '[.[] | select(.pattern != "Hardcoded tls.Config")]')
+				elif [ "$filtered_count" -lt "$(echo "$tls_config_files" | tr ',' '\n' | wc -l | tr -d ' ')" ]; then
+					# Some files filtered out - update the finding
+					findings=$(echo "$findings" | jq --arg f "$filtered_files" --arg c "$filtered_count" \
+						'[.[] | if .pattern == "Hardcoded tls.Config" then .files = $f | .count = ($c|tonumber) else . end]')
+				fi
 			fi
 		fi
 	fi
@@ -611,6 +667,7 @@ update_cache_result() {
 	local repo="$1"
 	local findings="$2"
 	local branch="$3"
+	local language="${4:-Go}"
 
 	local timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -619,10 +676,10 @@ update_cache_result() {
 		echo '{"timestamp":"'"$timestamp"'","repositories":{}}' >"$RESULTS_CACHE"
 	fi
 
-	# Update the cache (include branch for hyperlinks)
+	# Update the cache (include branch and language for hyperlinks)
 	local temp_cache=$(mktemp)
-	jq --arg repo "$repo" --argjson findings "$findings" --arg timestamp "$timestamp" --arg branch "$branch" \
-		'.repositories[$repo] = {findings: $findings, last_checked: $timestamp, branch: $branch}' "$RESULTS_CACHE" >"$temp_cache" 2>/dev/null && mv "$temp_cache" "$RESULTS_CACHE" || rm -f "$temp_cache"
+	jq --arg repo "$repo" --argjson findings "$findings" --arg timestamp "$timestamp" --arg branch "$branch" --arg language "$language" \
+		'.repositories[$repo] = {findings: $findings, last_checked: $timestamp, branch: $branch, language: $language}' "$RESULTS_CACHE" >"$temp_cache" 2>/dev/null && mv "$temp_cache" "$RESULTS_CACHE" || rm -f "$temp_cache"
 }
 
 # Helper function to get cached result for a repository
@@ -652,11 +709,12 @@ update_cache_timestamp() {
 # API-BASED SCANNING (for GitHub Actions / no-clone mode)
 #===============================================================================
 
-# API-friendly search patterns for GitHub Code Search
+# API-friendly search patterns for GitHub Code Search, organized by language
 # Format: "severity|pattern_name|description|search_query|verify_regex"
 # Note: GitHub Code Search doesn't support full regex, so we use simple keywords
 # and verify matches by fetching file content
-API_PATTERNS=(
+
+GO_API_PATTERNS=(
 	"CRITICAL|InsecureSkipVerify: true|Disables TLS certificate verification (MITM vulnerability)|InsecureSkipVerify true|InsecureSkipVerify[[:space:]]*:[[:space:]]*true"
 	"HIGH|MinVersion TLS 1.0|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|MinVersion VersionTLS10|MinVersion.*VersionTLS10"
 	"HIGH|MinVersion TLS 1.1|TLS 1.1 has known vulnerabilities|MinVersion VersionTLS11|MinVersion.*VersionTLS11"
@@ -669,6 +727,61 @@ API_PATTERNS=(
 	"INFO|Hardcoded tls.Config|Hardcoded TLS config (review for API server TLS profile adherence)|tls.Config|tls\.Config[[:space:]]*\{"
 	"INFO|PQC/ML-KEM patterns|Post-Quantum Cryptography adoption (ML-KEM)|MLKEM OR mlkem OR X25519MLKEM|(X25519MLKEM|MLKEM768|mlkem768|crypto/mlkem|NewDecapsulationKey|NewEncapsulationKey)"
 )
+
+PYTHON_API_PATTERNS=(
+	"CRITICAL|verify=False|Disables TLS certificate verification (MITM vulnerability)|verify False|verify[[:space:]]*=[[:space:]]*False"
+	"CRITICAL|ssl.CERT_NONE|Disables certificate verification via ssl module|CERT_NONE|CERT_NONE"
+	"CRITICAL|_create_unverified_context|Creates SSL context without certificate verification|_create_unverified_context|_create_unverified_context"
+	"CRITICAL|check_hostname = False|Disables hostname verification|check_hostname False|check_hostname[[:space:]]*=[[:space:]]*False"
+	"HIGH|PROTOCOL_TLSv1 (1.0)|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|PROTOCOL_TLSv1|PROTOCOL_TLSv1[^_]"
+	"HIGH|PROTOCOL_TLSv1_1|TLS 1.1 has known vulnerabilities|PROTOCOL_TLSv1_1|PROTOCOL_TLSv1_1"
+	"MEDIUM|maximum_version TLSv1_2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maximum_version TLSv1_2|maximum_version.*TLSv1_2"
+	"INFO|minimum_version TLSv1_3|Forces TLS 1.3 (may break older clients)|minimum_version TLSv1_3|minimum_version.*TLSv1_3"
+)
+
+NODE_API_PATTERNS=(
+	"CRITICAL|rejectUnauthorized: false|Disables TLS certificate verification (MITM vulnerability)|rejectUnauthorized false|rejectUnauthorized[[:space:]]*:[[:space:]]*false"
+	"CRITICAL|NODE_TLS_REJECT_UNAUTHORIZED|Disables TLS verification via environment variable|NODE_TLS_REJECT_UNAUTHORIZED|NODE_TLS_REJECT_UNAUTHORIZED"
+	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLSv1_method|TLSv1_method"
+	"HIGH|TLSv1_1_method|TLS 1.1 has known vulnerabilities|TLSv1_1_method|TLSv1_1_method"
+	"HIGH|minVersion TLS 1.0/1.1|Allows weak TLS versions|minVersion TLSv1|minVersion.*TLSv1[^.3]"
+	"MEDIUM|maxVersion TLSv1.2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maxVersion TLSv1.2|maxVersion.*TLSv1\.2"
+	"INFO|minVersion TLSv1.3|Forces TLS 1.3 (may break older clients)|minVersion TLSv1.3|minVersion.*TLSv1\.3"
+)
+
+CPP_API_PATTERNS=(
+	"CRITICAL|SSL_CTX_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_VERIFY_NONE|SSL_CTX_set_verify.*SSL_VERIFY_NONE"
+	"CRITICAL|SSL_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_set_verify SSL_VERIFY_NONE|SSL_set_verify.*SSL_VERIFY_NONE"
+	"HIGH|TLS1_VERSION|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLS1_VERSION|TLS1_VERSION[^_]"
+	"HIGH|TLS1_1_VERSION|TLS 1.1 has known vulnerabilities|TLS1_1_VERSION|TLS1_1_VERSION"
+	"HIGH|SSLv3_method|SSL 3.0 has known vulnerabilities (POODLE)|SSLv3_method|SSLv3_method"
+	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities|TLSv1_method|TLSv1_method[^_]"
+	"MEDIUM|SSL_CTX_set_max_proto_version TLS1_2|Caps maximum TLS version at 1.2|SSL_CTX_set_max_proto_version TLS1_2_VERSION|SSL_CTX_set_max_proto_version.*TLS1_2_VERSION"
+	"INFO|SSL_CTX_set_min_proto_version TLS1_3|Forces TLS 1.3 (may break older clients)|SSL_CTX_set_min_proto_version TLS1_3_VERSION|SSL_CTX_set_min_proto_version.*TLS1_3_VERSION"
+)
+
+# Get API patterns for a given language
+get_api_patterns_for_language() {
+	local lang="$1"
+	case "$lang" in
+	Go) printf '%s\n' "${GO_API_PATTERNS[@]}" ;;
+	Python) printf '%s\n' "${PYTHON_API_PATTERNS[@]}" ;;
+	JavaScript | TypeScript) printf '%s\n' "${NODE_API_PATTERNS[@]}" ;;
+	C++) printf '%s\n' "${CPP_API_PATTERNS[@]}" ;;
+	esac
+}
+
+# Get GitHub Code Search --language flag value for a language
+get_search_language() {
+	local lang="$1"
+	case "$lang" in
+	Go) echo "go" ;;
+	Python) echo "python" ;;
+	JavaScript) echo "javascript" ;;
+	TypeScript) echo "typescript" ;;
+	C++) echo "c++" ;;
+	esac
+}
 
 # Rate limiting for API mode (requests per minute limit)
 API_DELAY=7 # seconds between code search requests (to stay under 10/min)
@@ -688,7 +801,7 @@ api_rate_limit() {
 should_exclude_path() {
 	local filepath="$1"
 
-	# Exclude vendor, test directories, and test files
+	# Exclude vendor, test directories, test files, and language-specific dirs
 	case "$filepath" in
 	vendor/* | */vendor/*) return 0 ;;
 	testdata/* | */testdata/*) return 0 ;;
@@ -700,7 +813,14 @@ should_exclude_path() {
 	testing/* | */testing/*) return 0 ;;
 	fakes/* | */fakes/*) return 0 ;;
 	fixtures/* | */fixtures/*) return 0 ;;
+	node_modules/* | */node_modules/*) return 0 ;;
+	__pycache__/* | */__pycache__/*) return 0 ;;
+	.venv/* | */.venv/* | venv/* | */venv/*) return 0 ;;
+	__tests__/* | */__tests__/*) return 0 ;;
 	*_test.go) return 0 ;;
+	*_test.py | test_*.py | conftest.py) return 0 ;;
+	*.test.js | *.spec.js | *.test.ts | *.spec.ts) return 0 ;;
+	*_test.cpp | *_test.cc) return 0 ;;
 	esac
 
 	return 1
@@ -742,9 +862,12 @@ verify_match_in_file() {
 scan_repo_api() {
 	local repo="$1"
 	local branch="$2"
+	local language="$3"
 	local findings="[]"
+	local search_lang=$(get_search_language "$language")
 
-	for pattern_def in "${API_PATTERNS[@]}"; do
+	while IFS= read -r pattern_def; do
+		[ -z "$pattern_def" ] && continue
 		IFS='|' read -r severity pattern description search_query verify_regex <<<"$pattern_def"
 
 		# Rate limit
@@ -753,12 +876,12 @@ scan_repo_api() {
 		# Build full query with exclusions
 		# GitHub Code Search supports NOT path: syntax in the query string
 		# Note: We exclude common test/vendor directories directly in the search
-		local full_query="${search_query} NOT path:vendor/ NOT path:testdata/ NOT path:mocks/ NOT path:mock/ NOT path:test/ NOT path:tests/ NOT path:e2e/ NOT path:testing/ NOT path:fakes/ NOT path:fixtures/"
+		local full_query="${search_query} NOT path:vendor/ NOT path:testdata/ NOT path:mocks/ NOT path:mock/ NOT path:test/ NOT path:tests/ NOT path:e2e/ NOT path:testing/ NOT path:fakes/ NOT path:fixtures/ NOT path:node_modules/ NOT path:__pycache__/ NOT path:venv/ NOT path:.venv/"
 
 		# Search using gh search code with exclusions in the query
 		local search_result=$(gh search code "$full_query" \
 			--repo "$repo" \
-			--extension go \
+			--language "$search_lang" \
 			--limit 100 \
 			--json path 2>/dev/null)
 
@@ -802,7 +925,7 @@ scan_repo_api() {
 				--arg d "$description" --arg f "$verified_files" --arg c "$verified_count" --arg b "$branch" \
 				'. + [{severity: $s, pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
 		fi
-	done
+	done < <(get_api_patterns_for_language "$language")
 
 	echo "$findings"
 }
@@ -810,24 +933,6 @@ scan_repo_api() {
 #===============================================================================
 # LOAD CACHES
 #===============================================================================
-
-# Load fork cache info if it exists
-FORK_COUNT_LOADED=0
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	FORK_COUNT_LOADED=$(wc -l <"$FORK_CACHE" | tr -d ' ')
-	echo "Loading fork cache from $FORK_CACHE..."
-	echo -e "${GREEN}Loaded ${FORK_COUNT_LOADED} fork repositories to skip${RESET}"
-	echo
-fi
-
-# Load no-go.mod cache info if it exists
-NOGOMOD_COUNT_LOADED=0
-if [ -f "$NOGOMOD_CACHE" ] && [ -s "$NOGOMOD_CACHE" ]; then
-	NOGOMOD_COUNT_LOADED=$(wc -l <"$NOGOMOD_CACHE" | tr -d ' ')
-	echo "Loading no-go.mod cache from $NOGOMOD_CACHE..."
-	echo -e "${GREEN}Loaded ${NOGOMOD_COUNT_LOADED} repositories without go.mod to skip${RESET}"
-	echo
-fi
 
 # Load abandoned repo cache info if it exists
 ABANDONED_COUNT_LOADED=0
@@ -871,9 +976,6 @@ else
 fi
 echo
 
-# Temporary file to track newly discovered no-go.mod repos
-NOGOMOD_TEMP=$(mktemp)
-
 # Temporary file to store org-specific data for tracking issue
 ORG_DATA_FILE=$(mktemp)
 
@@ -888,28 +990,29 @@ declare -a INFO_FINDINGS
 
 echo -e "${BLUE}${BOLD}SCANNING REPOSITORIES FOR TLS CONFIGURATION ISSUES${RESET}"
 echo -e "${BLUE}=======================================================${RESET}"
-echo -e "${YELLOW}Checking for: InsecureSkipVerify, weak TLS versions,${RESET}"
-echo -e "${YELLOW}              MaxVersion caps, deprecated options, and PQC readiness${RESET}"
+echo -e "${YELLOW}Languages: Go, Python, JavaScript/TypeScript, C++${RESET}"
+echo -e "${YELLOW}Checking for: certificate verification bypass, weak TLS versions,${RESET}"
+echo -e "${YELLOW}              version caps, deprecated options, and PQC readiness${RESET}"
 echo -e "${BLUE}-------------------------------------------------------${RESET}"
 echo
 
 for ORG_NAME in "${ORGS[@]}"; do
 	echo -e "${YELLOW}${BOLD}Organization: ${ORG_NAME}${RESET}"
 
-	# Get all repos (Go language, non-archived, non-fork)
+	# Get all repos (supported languages, non-archived)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
-	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,primaryLanguage,isFork -q '.[] | select(.isArchived == false) | select(.primaryLanguage.name == "Go") | .nameWithOwner + " " + .defaultBranchRef.name + " " + (.isFork | tostring)')
+	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,primaryLanguage -q '.[] | select(.isArchived == false) | select(.primaryLanguage.name == ("Go","C++","JavaScript","TypeScript","Python")) | .nameWithOwner + " " + .defaultBranchRef.name + " " + .primaryLanguage.name')
 	REPO_COUNT=$(echo "$REPOS" | grep -v '^$' | wc -l | tr -d ' ')
 
 	if [ "$REPO_COUNT" -eq 0 ]; then
-		echo -e "${BLUE}   No active Go repositories found${RESET}"
+		echo -e "${BLUE}   No active repositories found${RESET}"
 		echo
 		continue
 	fi
 
 	TOTAL_REPOS=$((TOTAL_REPOS + REPO_COUNT))
 
-	echo -e "${BLUE}   Found ${REPO_COUNT} active Go repositories to scan${RESET}"
+	echo -e "${BLUE}   Found ${REPO_COUNT} active repositories to scan${RESET}"
 	echo
 
 	# Track results for this organization
@@ -918,27 +1021,17 @@ for ORG_NAME in "${ORGS[@]}"; do
 	ORG_MEDIUM=0
 	ORG_INFO=0
 
-	while read -r repo branch is_fork; do
+	while read -r repo branch language; do
 		# Skip empty lines
 		[[ -z "$repo" ]] && continue
 
 		# Show progress indicator
-		echo -ne "   ${repo} on branch ${branch}... "
+		echo -ne "   ${repo} [${language}] on branch ${branch}... "
 
 		# Check if repo is blocklisted
 		if is_blocklisted "$repo"; then
 			echo -e "${BLUE}skipped (blocklisted)${RESET}"
 			SKIPPED_BLOCKLIST=$((SKIPPED_BLOCKLIST + 1))
-			continue
-		fi
-
-		# Check if repo is a fork (either from cache or API)
-		if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
-			echo -e "${BLUE}skipped (fork)${RESET}"
-			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
-			if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
-				echo "$repo" >>"$FORK_CACHE"
-			fi
 			continue
 		fi
 
@@ -954,22 +1047,6 @@ for ORG_NAME in "${ORGS[@]}"; do
 			echo -e "${BLUE}skipped (abandoned - no recent commits)${RESET}"
 			echo "$repo" >>"$ABANDONED_CACHE"
 			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
-			continue
-		fi
-
-		# Check if repo is in no-go.mod cache
-		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
-			echo -e "${BLUE}skipped (no go.mod)${RESET}"
-			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
-			continue
-		fi
-
-		# Check for go.mod via API (faster than cloning first)
-		raw_url="https://raw.githubusercontent.com/$repo/$branch/go.mod"
-		if ! curl -s -f -I "$raw_url" >/dev/null 2>&1; then
-			echo -e "${YELLOW}no go.mod (cached)${RESET}"
-			echo "$repo" >>"$NOGOMOD_TEMP"
-			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
 			continue
 		fi
 
@@ -1006,7 +1083,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 		# Perform scanning based on mode
 		if [ "$SCAN_MODE" = "api" ]; then
 			# API mode: use GitHub Code Search
-			findings=$(scan_repo_api "$repo" "$branch")
+			findings=$(scan_repo_api "$repo" "$branch" "$language")
 		else
 			# Clone mode: ensure repo is cloned and up-to-date
 			repo_path=$(ensure_repo_updated "$repo" "$branch")
@@ -1017,18 +1094,18 @@ for ORG_NAME in "${ORGS[@]}"; do
 			fi
 
 			# Perform TLS pattern search using grep
-			findings=$(scan_local_repo "$repo_path" "$branch")
+			findings=$(scan_local_repo "$repo_path" "$branch" "$language")
 		fi
 
 		if [ -z "$findings" ] || [ "$findings" = "[]" ] || [ "$findings" = "null" ]; then
 			echo -e "${GREEN}no issues found${RESET}"
-			update_cache_result "$repo" "[]" "$branch"
+			update_cache_result "$repo" "[]" "$branch" "$language"
 		else
 			finding_count=$(echo "$findings" | jq 'length')
 			echo -e "${YELLOW}${finding_count} issue(s) found${RESET}"
 
 			# Update cache
-			update_cache_result "$repo" "$findings" "$branch"
+			update_cache_result "$repo" "$findings" "$branch" "$language"
 
 			# Count by severity
 			for severity in CRITICAL HIGH MEDIUM INFO; do
@@ -1065,21 +1142,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 	echo
 done
 
-# Update no-go.mod cache
-if [ -f "$NOGOMOD_TEMP" ] && [ -s "$NOGOMOD_TEMP" ]; then
-	cat "$NOGOMOD_TEMP" >>"$NOGOMOD_CACHE"
-	sort -u "$NOGOMOD_CACHE" -o "$NOGOMOD_CACHE"
-	NEW_NOGOMOD=$(wc -l <"$NOGOMOD_TEMP" | tr -d ' ')
-	echo -e "${BLUE}Updated no-go.mod cache with ${NEW_NOGOMOD} new entries${RESET}"
-	echo
-fi
-rm -f "$NOGOMOD_TEMP"
-
 # Sort and deduplicate caches
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	sort -u "$FORK_CACHE" -o "$FORK_CACHE"
-fi
-
 if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
 	sort -u "$ABANDONED_CACHE" -o "$ABANDONED_CACHE"
 fi
@@ -1092,9 +1155,7 @@ REPOS_WITH_ISSUES=${REPOS_WITH_ISSUES:-0}
 # Final summary
 echo -e "${BOLD}${BLUE}FINAL RESULTS:${RESET}"
 echo -e "${BOLD}   Total repositories scanned:${RESET} ${TOTAL_REPOS}"
-echo -e "${BOLD}   Repositories skipped (forks):${RESET} ${BLUE}${SKIPPED_FORKS}${RESET}"
 echo -e "${BOLD}   Repositories skipped (abandoned):${RESET} ${BLUE}${SKIPPED_ABANDONED}${RESET}"
-echo -e "${BOLD}   Repositories skipped (no go.mod):${RESET} ${BLUE}${SKIPPED_NOGOMOD}${RESET}"
 echo -e "${BOLD}   Repositories skipped (blocklisted):${RESET} ${BLUE}${SKIPPED_BLOCKLIST}${RESET}"
 if [ "$SCAN_MODE" = "clone" ] && [ "$CLONE_FAILURES" -gt 0 ]; then
 	echo -e "${BOLD}   Clone failures:${RESET} ${RED}${CLONE_FAILURES}${RESET}"
@@ -1132,13 +1193,10 @@ echo "Generating markdown report: $OUTPUT_MD"
 	echo ""
 	echo "| Severity | Description |"
 	echo "|----------|-------------|"
-	echo "| CRITICAL | InsecureSkipVerify: true - Disables certificate verification, enables MITM attacks |"
-	echo "| HIGH | TLS 1.0/1.1 MinVersion or MaxVersion - Known vulnerabilities (POODLE, BEAST) |"
+	echo "| CRITICAL | Certificate verification disabled (InsecureSkipVerify, verify=False, rejectUnauthorized: false, SSL_VERIFY_NONE) |"
+	echo "| HIGH | TLS 1.0/1.1 protocol version usage - Known vulnerabilities (POODLE, BEAST) |"
 	echo "| MEDIUM | MaxVersion capped at TLS 1.2 - Prevents TLS 1.3 negotiation |"
-	echo "| INFO | Forced TLS 1.3, or PreferServerCipherSuites (deprecated in Go 1.17+) |"
-	echo "| INFO | CurvePreferences - Explicit curve config (PQC readiness indicator) |"
-	echo "| INFO | Hardcoded tls.Config - Direct TLS config (review for TLS profile adherence) |"
-	echo "| INFO | PQC/ML-KEM patterns - Post-Quantum Cryptography adoption indicators |"
+	echo "| INFO | TLS 1.3 forced, deprecated options, CurvePreferences, Hardcoded tls.Config, PQC/ML-KEM |"
 	echo ""
 
 	if [ "$REPOS_WITH_ISSUES" -gt 0 ]; then
@@ -1189,9 +1247,11 @@ JQEOF
 
 		echo "## Remediation Guide"
 		echo ""
-		echo "### Critical: InsecureSkipVerify"
+		echo "### Critical: Certificate Verification Disabled"
 		echo ""
-		echo "**Never** set \`InsecureSkipVerify: true\` in production code. This disables TLS certificate verification and makes the connection vulnerable to man-in-the-middle attacks."
+		echo "**Never** disable certificate verification in production code. This makes connections vulnerable to man-in-the-middle attacks."
+		echo ""
+		echo "#### Go: InsecureSkipVerify"
 		echo ""
 		echo "\`\`\`go"
 		echo "// BAD - DO NOT USE IN PRODUCTION"
@@ -1201,10 +1261,45 @@ JQEOF
 		echo ""
 		echo "// GOOD - Verify certificates properly"
 		echo "tlsConfig := &tls.Config{"
-		echo "    // Use system root CA pool by default"
-		echo "    // Or specify custom CA if needed"
-		echo "    RootCAs: customCertPool,"
+		echo "    RootCAs: customCertPool, // Or use system CA"
 		echo "}"
+		echo "\`\`\`"
+		echo ""
+		echo "#### Python: verify=False / CERT_NONE"
+		echo ""
+		echo "\`\`\`python"
+		echo "# BAD - DO NOT USE IN PRODUCTION"
+		echo "requests.get(url, verify=False)  # VULNERABLE"
+		echo "ctx = ssl.create_default_context()"
+		echo "ctx.check_hostname = False  # VULNERABLE"
+		echo "ctx.verify_mode = ssl.CERT_NONE  # VULNERABLE"
+		echo ""
+		echo "# GOOD - Verify certificates properly"
+		echo "requests.get(url, verify=True)  # Default"
+		echo "requests.get(url, verify='/path/to/ca-bundle.crt')  # Custom CA"
+		echo "ctx = ssl.create_default_context()  # Verifies by default"
+		echo "\`\`\`"
+		echo ""
+		echo "#### Node.js: rejectUnauthorized: false"
+		echo ""
+		echo "\`\`\`javascript"
+		echo "// BAD - DO NOT USE IN PRODUCTION"
+		echo "const agent = new https.Agent({ rejectUnauthorized: false }); // VULNERABLE"
+		echo "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // VULNERABLE"
+		echo ""
+		echo "// GOOD - Verify certificates properly"
+		echo "const agent = new https.Agent({ ca: fs.readFileSync('ca.pem') });"
+		echo "\`\`\`"
+		echo ""
+		echo "#### C++: SSL_VERIFY_NONE"
+		echo ""
+		echo "\`\`\`cpp"
+		echo "// BAD - DO NOT USE IN PRODUCTION"
+		echo "SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL); // VULNERABLE"
+		echo ""
+		echo "// GOOD - Verify certificates properly"
+		echo "SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);"
+		echo "SSL_CTX_load_verify_locations(ctx, \"ca.pem\", NULL);"
 		echo "\`\`\`"
 		echo ""
 		echo "### High: Weak TLS Versions"
@@ -1235,53 +1330,12 @@ JQEOF
 		echo "}"
 		echo "\`\`\`"
 		echo ""
-		echo "### Info: Deprecated Options"
+		echo "### Info: Go-Specific"
 		echo ""
 		echo "- **PreferServerCipherSuites**: Deprecated in Go 1.17, now a no-op"
-		echo "- **MinVersion: TLS 1.3**: May break compatibility with older clients"
-		echo ""
-		echo "### Info: CurvePreferences"
-		echo ""
-		echo "Explicit curve configuration indicates awareness of TLS key exchange parameters."
-		echo "This is a PQC readiness indicator -- when ML-KEM support is available, this field"
-		echo "will be used to enable post-quantum key exchange."
-		echo ""
-		echo "\`\`\`go"
-		echo "// Current: explicit curve preferences"
-		echo "tlsConfig := &tls.Config{"
-		echo "    CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},"
-		echo "}"
-		echo ""
-		echo "// Future: add PQC hybrid key exchange when available"
-		echo "tlsConfig := &tls.Config{"
-		echo "    CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519, tls.CurveP256},"
-		echo "}"
-		echo "\`\`\`"
-		echo ""
-		echo "### Info: Hardcoded tls.Config"
-		echo ""
-		echo "Direct \`tls.Config{}\` initialization may bypass centralized TLS profile management."
-		echo "Where possible, consume the API server's \`TLSSecurityProfile\` to ensure consistent"
-		echo "TLS settings across the platform."
-		echo ""
-		echo "\`\`\`go"
-		echo "// Preferred: consume TLSSecurityProfile from API server config"
-		echo "profile := apiServerConfig.Spec.TLSSecurityProfile"
-		echo "tlsConfig := crypto.TLSConfigFromProfile(profile)"
-		echo "\`\`\`"
-		echo ""
-		echo "Repos that already reference \`TLSSecurityProfile\` are automatically filtered from this finding."
-		echo ""
-		echo "### Info: PQC/ML-KEM Patterns"
-		echo ""
-		echo "These repos are adopting Post-Quantum Cryptography (PQC) using NIST-standardized ML-KEM"
-		echo "(Module-Lattice-Based Key Encapsulation, FIPS 203). Key identifiers:"
-		echo ""
-		echo "- \`X25519MLKEM768\` - Hybrid post-quantum key exchange"
-		echo "- \`crypto/mlkem\` - Go standard library PQC package"
-		echo "- \`NewDecapsulationKey\` / \`NewEncapsulationKey\` - ML-KEM key operations"
-		echo ""
-		echo "No action needed -- these repos are ahead of the curve in PQC readiness."
+		echo "- **CurvePreferences**: PQC readiness indicator for ML-KEM migration"
+		echo "- **Hardcoded tls.Config**: Review for TLS profile adherence"
+		echo "- **PQC/ML-KEM**: Post-quantum cryptography adoption (no action needed)"
 		echo ""
 	else
 		echo "## All Clear!"
@@ -1321,13 +1375,10 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 | Severity | Meaning |
 |----------|---------|
-| CRITICAL | InsecureSkipVerify: true - Disables certificate verification |
-| HIGH | TLS 1.0/1.1 MinVersion or MaxVersion - Known vulnerabilities |
+| CRITICAL | Certificate verification disabled (InsecureSkipVerify, verify=False, rejectUnauthorized: false, SSL_VERIFY_NONE) |
+| HIGH | TLS 1.0/1.1 protocol version usage - Known vulnerabilities |
 | MEDIUM | MaxVersion capped at TLS 1.2 - Prevents TLS 1.3 |
-| INFO | Forced TLS 1.3, or PreferServerCipherSuites (deprecated) |
-| INFO | CurvePreferences - Explicit curve config (PQC readiness indicator) |
-| INFO | Hardcoded tls.Config - Direct TLS config (review for TLS profile adherence) |
-| INFO | PQC/ML-KEM patterns - Post-Quantum Cryptography adoption indicators |
+| INFO | TLS 1.3 forced, deprecated options, CurvePreferences, Hardcoded tls.Config, PQC/ML-KEM |
 
 ---
 
@@ -1351,8 +1402,8 @@ if [ "$UPDATE_TRACKING" = true ]; then
 		fi
 
 		if [ "$repo_count" -eq 0 ]; then
-			# Org had no Go repos
-			ISSUE_BODY+="| ${org} | 0 | No Go repos |
+			# Org had no repos in supported languages
+			ISSUE_BODY+="| ${org} | 0 | No repos |
 "
 		elif [ "$issue_count" -eq 0 ]; then
 			# Fully compliant
@@ -1437,20 +1488,18 @@ JQEOF
 
 ## Remediation Guide
 
-### Critical: InsecureSkipVerify
+### Critical: Certificate Verification Disabled
 
-**Never** set \`InsecureSkipVerify: true\` in production. This disables TLS certificate verification.
+**Never** disable certificate verification in production. This enables MITM attacks.
 
-\`\`\`go
-// GOOD - Verify certificates properly
-tlsConfig := &tls.Config{
-    RootCAs: customCertPool, // Or use system CA
-}
-\`\`\`
+**Go:** Remove \`InsecureSkipVerify: true\` and use proper CA certificates.
+**Python:** Remove \`verify=False\`, \`CERT_NONE\`, and \`_create_unverified_context\`. Use \`verify=True\` (default).
+**Node.js:** Remove \`rejectUnauthorized: false\` and \`NODE_TLS_REJECT_UNAUTHORIZED='0'\`. Use proper CA config.
+**C++:** Replace \`SSL_VERIFY_NONE\` with \`SSL_VERIFY_PEER\` and load CA certificates.
 
 ### High: Weak TLS Versions
 
-Use TLS 1.2 minimum:
+Use TLS 1.2 minimum. Remove references to TLS 1.0/1.1 protocol versions.
 
 \`\`\`go
 tlsConfig := &tls.Config{
@@ -1458,19 +1507,11 @@ tlsConfig := &tls.Config{
 }
 \`\`\`
 
-### PQC Readiness
+### Go-Specific: PQC Readiness
 
-**CurvePreferences:** Explicit curve configuration is a PQC readiness indicator. When ML-KEM support is available in Go, add \`X25519MLKEM768\` as the preferred curve:
-
-\`\`\`go
-tlsConfig := &tls.Config{
-    CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519, tls.CurveP256},
-}
-\`\`\`
-
-**Hardcoded tls.Config:** Where possible, consume the API server's \`TLSSecurityProfile\` for consistent TLS settings across the platform. Repos already referencing \`TLSSecurityProfile\` are filtered from this finding.
-
-**PQC/ML-KEM:** Repos using ML-KEM identifiers (\`X25519MLKEM768\`, \`crypto/mlkem\`, \`NewDecapsulationKey\`, \`NewEncapsulationKey\`) are already preparing for post-quantum cryptography. No action needed.
+**CurvePreferences:** PQC readiness indicator. Add \`X25519MLKEM768\` when ML-KEM support is available.
+**Hardcoded tls.Config:** Prefer consuming \`TLSSecurityProfile\` from the API server.
+**PQC/ML-KEM:** Repos using ML-KEM identifiers are already preparing for post-quantum cryptography.
 
 "
 	else
@@ -1487,9 +1528,14 @@ No TLS configuration issues found in any scanned repositories.
 
 **TLS 1.3 Documentation:**
 - [RFC 8446 - TLS 1.3 Specification](https://datatracker.ietf.org/doc/html/rfc8446)
-- [Go crypto/tls Package](https://pkg.go.dev/crypto/tls)
 - [OWASP TLS Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html)
 - [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)
+
+**Language-Specific TLS Documentation:**
+- [Go crypto/tls Package](https://pkg.go.dev/crypto/tls)
+- [Python ssl Module](https://docs.python.org/3/library/ssl.html)
+- [Node.js TLS Module](https://nodejs.org/api/tls.html)
+- [OpenSSL Documentation](https://www.openssl.org/docs/)
 
 **Security Advisories:**
 - [POODLE Attack (CVE-2014-3566)](https://nvd.nist.gov/vuln/detail/CVE-2014-3566) - SSL 3.0/TLS 1.0 vulnerability
