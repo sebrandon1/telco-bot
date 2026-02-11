@@ -9,45 +9,31 @@
 #   configuration issues and anti-patterns across multiple languages:
 #   Go, Python, Node.js (JavaScript/TypeScript), and C++.
 #
-#   It identifies insecure TLS settings, weak version constraints,
-#   disabled certificate verification, and deprecated options.
+#   Uses a binary PASS/FAIL model aligned with CNF-21745: any hardcoded
+#   TLS configuration that doesn't dynamically inherit from the cluster's
+#   centralized tlsSecurityProfile is a FAIL. Components properly using
+#   the centralized profile are a PASS.
 #
 #   Uses local clones for fast, rate-limit-free scanning instead of GitHub
 #   Code Search API.
 #
-# SEVERITY LEVELS:
+# WHAT IS DETECTED (all are FAIL findings):
 #
-#   CRITICAL - Certificate verification disabled
+#   Certificate verification disabled:
 #     Go:     InsecureSkipVerify: true
 #     Python: verify=False, ssl.CERT_NONE, _create_unverified_context,
 #             check_hostname = False
 #     Node:   rejectUnauthorized: false, NODE_TLS_REJECT_UNAUTHORIZED
 #     C++:    SSL_CTX_set_verify(SSL_VERIFY_NONE), SSL_set_verify(SSL_VERIFY_NONE)
-#     Risk:   MITM attacks - complete loss of TLS security guarantees
-#     Action: Use proper CA certificates and enable verification
 #
-#   HIGH - TLS 1.0/1.1 protocol versions
+#   Weak TLS versions (1.0/1.1):
 #     Go:     MinVersion/MaxVersion set to VersionTLS10/VersionTLS11
 #     Python: PROTOCOL_TLSv1, PROTOCOL_TLSv1_1
 #     Node:   TLSv1_method, TLSv1_1_method, minVersion TLSv1/TLSv1.1
 #     C++:    TLS1_VERSION, TLS1_1_VERSION, SSLv3_method, TLSv1_method
-#     Risk:   POODLE, BEAST vulnerabilities; PCI-DSS/HIPAA non-compliance
-#     Action: Use TLS 1.2 minimum
 #
-#   MEDIUM - MaxVersion capped at TLS 1.2
-#     Go:     MaxVersion = VersionTLS12
-#     Python: maximum_version = TLSv1_2
-#     Node:   maxVersion: TLSv1.2
-#     C++:    SSL_CTX_set_max_proto_version(TLS1_2_VERSION)
-#     Risk:   Prevents TLS 1.3 negotiation and its security improvements
-#     Action: Remove version cap unless there's a specific compatibility need
-#
-#   INFO - Informational findings
-#     - MinVersion forced to TLS 1.3 (may break older clients)
-#     - Go: PreferServerCipherSuites (deprecated in Go 1.17+)
-#     - Go: CurvePreferences (PQC readiness indicator)
-#     - Go: Hardcoded tls.Config (review for TLS profile adherence)
-#     - Go: PQC/ML-KEM patterns (post-quantum cryptography adoption)
+#   Hardcoded TLS configuration:
+#     Go:     tls.Config{} not using centralized tlsSecurityProfile
 #
 # PREREQUISITES:
 #   1. GitHub CLI (gh) must be installed on your system
@@ -150,11 +136,9 @@ show_help() {
 	echo "                        - clone: Clone repos locally, scan with grep"
 	echo "                        - api: Use GitHub Code Search (for CI/CD)"
 	echo
-	echo -e "${BOLD}SEVERITY LEVELS:${RESET}"
-	echo "    CRITICAL    Certificate verification disabled (MITM vulnerability)"
-	echo "    HIGH        TLS 1.0/1.1 protocol version usage"
-	echo "    MEDIUM      MaxVersion capped at TLS 1.2"
-	echo "    INFO        TLS 1.3 forced, deprecated options, PQC readiness"
+	echo -e "${BOLD}PASS/FAIL MODEL:${RESET}"
+	echo "    All findings are FAIL. Repos with no findings are PASS."
+	echo "    Detects: cert verification bypass, weak TLS versions, hardcoded config"
 	echo
 	echo -e "${BOLD}PREREQUISITES:${RESET}"
 	echo "    - GitHub CLI (gh) must be installed and authenticated"
@@ -296,11 +280,8 @@ SKIPPED_ABANDONED=0
 SKIPPED_BLOCKLIST=0
 CLONE_FAILURES=0
 
-# Severity counters
-CRITICAL_COUNT=0
-HIGH_COUNT=0
-MEDIUM_COUNT=0
-INFO_COUNT=0
+# Finding counters
+TOTAL_FINDINGS=0
 
 # Get script directory for relative paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -309,6 +290,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="$SCRIPT_DIR/caches"
 ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
 BLOCKLIST_FILE="$SCRIPT_DIR/tls13-repo-blocklist.txt"
+REPO_LIST_FILE="$SCRIPT_DIR/tls13-compliance-checker-repo-list.txt"
 OUTPUT_MD="tls13-compliance-report.md"
 
 # Script-specific results cache
@@ -340,52 +322,42 @@ TRACKING_ISSUE_TITLE="Tracking TLS Configuration Compliance"
 SUPPORTED_LANGUAGES=("Go" "C++" "JavaScript" "TypeScript" "Python")
 
 # TLS patterns to search for, organized by language
-# Format: "severity|pattern_name|description|regex"
+# Format: "pattern_name|description|regex"
+# All findings are FAIL - no severity levels
 
 GO_TLS_PATTERNS=(
-	"CRITICAL|InsecureSkipVerify: true|Disables TLS certificate verification (MITM vulnerability)|InsecureSkipVerify[[:space:]]*:[[:space:]]*true"
-	"HIGH|MinVersion TLS 1.0|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS10"
-	"HIGH|MinVersion TLS 1.1|TLS 1.1 has known vulnerabilities|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS11"
-	"HIGH|MaxVersion TLS 1.0|Limits connections to weak TLS 1.0|MaxVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS10"
-	"HIGH|MaxVersion TLS 1.1|Limits connections to weak TLS 1.1|MaxVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS11"
-	"MEDIUM|MaxVersion TLS 1.2|Prevents TLS 1.3 negotiation|MaxVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS12"
-	"INFO|MinVersion TLS 1.3|Forces TLS 1.3 (may break older clients)|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS13"
-	"INFO|PreferServerCipherSuites|Deprecated in Go 1.17+ (ignored)|PreferServerCipherSuites[[:space:]]*:[[:space:]]*true"
-	"INFO|CurvePreferences|Explicit curve configuration (PQC readiness indicator)|CurvePreferences[[:space:]]*[:=]"
-	"INFO|Hardcoded tls.Config|Hardcoded TLS config (review for API server TLS profile adherence)|tls\.Config[[:space:]]*\{"
-	"INFO|PQC/ML-KEM patterns|Post-Quantum Cryptography adoption (ML-KEM)|(X25519MLKEM|MLKEM768|mlkem768|crypto/mlkem|NewDecapsulationKey|NewEncapsulationKey)"
+	"InsecureSkipVerify: true|Disables TLS certificate verification (MITM vulnerability)|InsecureSkipVerify[[:space:]]*:[[:space:]]*true"
+	"MinVersion TLS 1.0|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS10"
+	"MinVersion TLS 1.1|TLS 1.1 has known vulnerabilities|MinVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS11"
+	"MaxVersion TLS 1.0|Limits connections to weak TLS 1.0|MaxVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS10"
+	"MaxVersion TLS 1.1|Limits connections to weak TLS 1.1|MaxVersion[[:space:]]*[:=][[:space:]]*.*VersionTLS11"
+	"Hardcoded tls.Config|Hardcoded TLS config not using centralized tlsSecurityProfile|tls\.Config[[:space:]]*\{"
 )
 
 PYTHON_TLS_PATTERNS=(
-	"CRITICAL|verify=False|Disables TLS certificate verification (MITM vulnerability)|verify[[:space:]]*=[[:space:]]*False"
-	"CRITICAL|ssl.CERT_NONE|Disables certificate verification via ssl module|CERT_NONE"
-	"CRITICAL|_create_unverified_context|Creates SSL context without certificate verification|_create_unverified_context"
-	"CRITICAL|check_hostname = False|Disables hostname verification|check_hostname[[:space:]]*=[[:space:]]*False"
-	"HIGH|PROTOCOL_TLSv1 (1.0)|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|PROTOCOL_TLSv1[^_]"
-	"HIGH|PROTOCOL_TLSv1_1|TLS 1.1 has known vulnerabilities|PROTOCOL_TLSv1_1"
-	"MEDIUM|maximum_version TLSv1_2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maximum_version.*TLSv1_2"
-	"INFO|minimum_version TLSv1_3|Forces TLS 1.3 (may break older clients)|minimum_version.*TLSv1_3"
+	"verify=False|Disables TLS certificate verification (MITM vulnerability)|verify[[:space:]]*=[[:space:]]*False"
+	"ssl.CERT_NONE|Disables certificate verification via ssl module|CERT_NONE"
+	"_create_unverified_context|Creates SSL context without certificate verification|_create_unverified_context"
+	"check_hostname = False|Disables hostname verification|check_hostname[[:space:]]*=[[:space:]]*False"
+	"PROTOCOL_TLSv1 (1.0)|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|PROTOCOL_TLSv1[^_]"
+	"PROTOCOL_TLSv1_1|TLS 1.1 has known vulnerabilities|PROTOCOL_TLSv1_1"
 )
 
 NODE_TLS_PATTERNS=(
-	"CRITICAL|rejectUnauthorized: false|Disables TLS certificate verification (MITM vulnerability)|rejectUnauthorized[[:space:]]*:[[:space:]]*false"
-	"CRITICAL|NODE_TLS_REJECT_UNAUTHORIZED|Disables TLS verification via environment variable|NODE_TLS_REJECT_UNAUTHORIZED"
-	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLSv1_method"
-	"HIGH|TLSv1_1_method|TLS 1.1 has known vulnerabilities|TLSv1_1_method"
-	"HIGH|minVersion TLS 1.0/1.1|Allows weak TLS versions|minVersion.*TLSv1[^.3]"
-	"MEDIUM|maxVersion TLSv1.2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maxVersion.*TLSv1\.2"
-	"INFO|minVersion TLSv1.3|Forces TLS 1.3 (may break older clients)|minVersion.*TLSv1\.3"
+	"rejectUnauthorized: false|Disables TLS certificate verification (MITM vulnerability)|rejectUnauthorized[[:space:]]*:[[:space:]]*false"
+	"NODE_TLS_REJECT_UNAUTHORIZED|Disables TLS verification via environment variable|NODE_TLS_REJECT_UNAUTHORIZED"
+	"TLSv1_method|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLSv1_method"
+	"TLSv1_1_method|TLS 1.1 has known vulnerabilities|TLSv1_1_method"
+	"minVersion TLS 1.0/1.1|Allows weak TLS versions|minVersion.*TLSv1[^.3]"
 )
 
 CPP_TLS_PATTERNS=(
-	"CRITICAL|SSL_CTX_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_CTX_set_verify.*SSL_VERIFY_NONE"
-	"CRITICAL|SSL_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_set_verify.*SSL_VERIFY_NONE"
-	"HIGH|TLS1_VERSION|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLS1_VERSION[^_]"
-	"HIGH|TLS1_1_VERSION|TLS 1.1 has known vulnerabilities|TLS1_1_VERSION"
-	"HIGH|SSLv3_method|SSL 3.0 has known vulnerabilities (POODLE)|SSLv3_method"
-	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities|TLSv1_method[^_]"
-	"MEDIUM|SSL_CTX_set_max_proto_version TLS1_2|Caps maximum TLS version at 1.2|SSL_CTX_set_max_proto_version.*TLS1_2_VERSION"
-	"INFO|SSL_CTX_set_min_proto_version TLS1_3|Forces TLS 1.3 (may break older clients)|SSL_CTX_set_min_proto_version.*TLS1_3_VERSION"
+	"SSL_CTX_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_CTX_set_verify.*SSL_VERIFY_NONE"
+	"SSL_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_set_verify.*SSL_VERIFY_NONE"
+	"TLS1_VERSION|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLS1_VERSION[^_]"
+	"TLS1_1_VERSION|TLS 1.1 has known vulnerabilities|TLS1_1_VERSION"
+	"SSLv3_method|SSL 3.0 has known vulnerabilities (POODLE)|SSLv3_method"
+	"TLSv1_method|TLS 1.0 has known vulnerabilities|TLSv1_method[^_]"
 )
 
 # Get TLS patterns for a given language
@@ -590,7 +562,7 @@ scan_local_repo() {
 
 	while IFS= read -r pattern_def; do
 		[ -z "$pattern_def" ] && continue
-		IFS='|' read -r severity pattern description regex <<<"$pattern_def"
+		IFS='|' read -r pattern description regex <<<"$pattern_def"
 
 		# Search for pattern, excluding vendor, testdata, mocks, test directories, and test files
 		# shellcheck disable=SC2086
@@ -607,9 +579,9 @@ scan_local_repo() {
 			local count=$(echo "$matches" | wc -l | tr -d ' ')
 
 			# Add to findings using jq (include branch for hyperlinks)
-			findings=$(echo "$findings" | jq --arg s "$severity" --arg p "$pattern" \
+			findings=$(echo "$findings" | jq --arg p "$pattern" \
 				--arg d "$description" --arg f "$files" --arg c "$count" --arg b "$branch" \
-				'. + [{severity: $s, pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
+				'. + [{pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
 		fi
 	done < <(get_patterns_for_language "$language")
 
@@ -710,54 +682,43 @@ update_cache_timestamp() {
 #===============================================================================
 
 # API-friendly search patterns for GitHub Code Search, organized by language
-# Format: "severity|pattern_name|description|search_query|verify_regex"
+# Format: "pattern_name|description|search_query|verify_regex"
 # Note: GitHub Code Search doesn't support full regex, so we use simple keywords
 # and verify matches by fetching file content
 
 GO_API_PATTERNS=(
-	"CRITICAL|InsecureSkipVerify: true|Disables TLS certificate verification (MITM vulnerability)|InsecureSkipVerify true|InsecureSkipVerify[[:space:]]*:[[:space:]]*true"
-	"HIGH|MinVersion TLS 1.0|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|MinVersion VersionTLS10|MinVersion.*VersionTLS10"
-	"HIGH|MinVersion TLS 1.1|TLS 1.1 has known vulnerabilities|MinVersion VersionTLS11|MinVersion.*VersionTLS11"
-	"HIGH|MaxVersion TLS 1.0|Limits connections to weak TLS 1.0|MaxVersion VersionTLS10|MaxVersion.*VersionTLS10"
-	"HIGH|MaxVersion TLS 1.1|Limits connections to weak TLS 1.1|MaxVersion VersionTLS11|MaxVersion.*VersionTLS11"
-	"MEDIUM|MaxVersion TLS 1.2|Prevents TLS 1.3 negotiation|MaxVersion VersionTLS12|MaxVersion.*VersionTLS12"
-	"INFO|MinVersion TLS 1.3|Forces TLS 1.3 (may break older clients)|MinVersion VersionTLS13|MinVersion.*VersionTLS13"
-	"INFO|PreferServerCipherSuites|Deprecated in Go 1.17+ (ignored)|PreferServerCipherSuites true|PreferServerCipherSuites[[:space:]]*:[[:space:]]*true"
-	"INFO|CurvePreferences|Explicit curve configuration (PQC readiness indicator)|CurvePreferences|CurvePreferences[[:space:]]*[:=]"
-	"INFO|Hardcoded tls.Config|Hardcoded TLS config (review for API server TLS profile adherence)|tls.Config|tls\.Config[[:space:]]*\{"
-	"INFO|PQC/ML-KEM patterns|Post-Quantum Cryptography adoption (ML-KEM)|MLKEM OR mlkem OR X25519MLKEM|(X25519MLKEM|MLKEM768|mlkem768|crypto/mlkem|NewDecapsulationKey|NewEncapsulationKey)"
+	"InsecureSkipVerify: true|Disables TLS certificate verification (MITM vulnerability)|InsecureSkipVerify true|InsecureSkipVerify[[:space:]]*:[[:space:]]*true"
+	"MinVersion TLS 1.0|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|MinVersion VersionTLS10|MinVersion.*VersionTLS10"
+	"MinVersion TLS 1.1|TLS 1.1 has known vulnerabilities|MinVersion VersionTLS11|MinVersion.*VersionTLS11"
+	"MaxVersion TLS 1.0|Limits connections to weak TLS 1.0|MaxVersion VersionTLS10|MaxVersion.*VersionTLS10"
+	"MaxVersion TLS 1.1|Limits connections to weak TLS 1.1|MaxVersion VersionTLS11|MaxVersion.*VersionTLS11"
+	"Hardcoded tls.Config|Hardcoded TLS config not using centralized tlsSecurityProfile|tls.Config|tls\.Config[[:space:]]*\{"
 )
 
 PYTHON_API_PATTERNS=(
-	"CRITICAL|verify=False|Disables TLS certificate verification (MITM vulnerability)|verify False|verify[[:space:]]*=[[:space:]]*False"
-	"CRITICAL|ssl.CERT_NONE|Disables certificate verification via ssl module|CERT_NONE|CERT_NONE"
-	"CRITICAL|_create_unverified_context|Creates SSL context without certificate verification|_create_unverified_context|_create_unverified_context"
-	"CRITICAL|check_hostname = False|Disables hostname verification|check_hostname False|check_hostname[[:space:]]*=[[:space:]]*False"
-	"HIGH|PROTOCOL_TLSv1 (1.0)|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|PROTOCOL_TLSv1|PROTOCOL_TLSv1[^_]"
-	"HIGH|PROTOCOL_TLSv1_1|TLS 1.1 has known vulnerabilities|PROTOCOL_TLSv1_1|PROTOCOL_TLSv1_1"
-	"MEDIUM|maximum_version TLSv1_2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maximum_version TLSv1_2|maximum_version.*TLSv1_2"
-	"INFO|minimum_version TLSv1_3|Forces TLS 1.3 (may break older clients)|minimum_version TLSv1_3|minimum_version.*TLSv1_3"
+	"verify=False|Disables TLS certificate verification (MITM vulnerability)|verify False|verify[[:space:]]*=[[:space:]]*False"
+	"ssl.CERT_NONE|Disables certificate verification via ssl module|CERT_NONE|CERT_NONE"
+	"_create_unverified_context|Creates SSL context without certificate verification|_create_unverified_context|_create_unverified_context"
+	"check_hostname = False|Disables hostname verification|check_hostname False|check_hostname[[:space:]]*=[[:space:]]*False"
+	"PROTOCOL_TLSv1 (1.0)|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|PROTOCOL_TLSv1|PROTOCOL_TLSv1[^_]"
+	"PROTOCOL_TLSv1_1|TLS 1.1 has known vulnerabilities|PROTOCOL_TLSv1_1|PROTOCOL_TLSv1_1"
 )
 
 NODE_API_PATTERNS=(
-	"CRITICAL|rejectUnauthorized: false|Disables TLS certificate verification (MITM vulnerability)|rejectUnauthorized false|rejectUnauthorized[[:space:]]*:[[:space:]]*false"
-	"CRITICAL|NODE_TLS_REJECT_UNAUTHORIZED|Disables TLS verification via environment variable|NODE_TLS_REJECT_UNAUTHORIZED|NODE_TLS_REJECT_UNAUTHORIZED"
-	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLSv1_method|TLSv1_method"
-	"HIGH|TLSv1_1_method|TLS 1.1 has known vulnerabilities|TLSv1_1_method|TLSv1_1_method"
-	"HIGH|minVersion TLS 1.0/1.1|Allows weak TLS versions|minVersion TLSv1|minVersion.*TLSv1[^.3]"
-	"MEDIUM|maxVersion TLSv1.2|Caps maximum TLS version at 1.2, preventing TLS 1.3|maxVersion TLSv1.2|maxVersion.*TLSv1\.2"
-	"INFO|minVersion TLSv1.3|Forces TLS 1.3 (may break older clients)|minVersion TLSv1.3|minVersion.*TLSv1\.3"
+	"rejectUnauthorized: false|Disables TLS certificate verification (MITM vulnerability)|rejectUnauthorized false|rejectUnauthorized[[:space:]]*:[[:space:]]*false"
+	"NODE_TLS_REJECT_UNAUTHORIZED|Disables TLS verification via environment variable|NODE_TLS_REJECT_UNAUTHORIZED|NODE_TLS_REJECT_UNAUTHORIZED"
+	"TLSv1_method|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLSv1_method|TLSv1_method"
+	"TLSv1_1_method|TLS 1.1 has known vulnerabilities|TLSv1_1_method|TLSv1_1_method"
+	"minVersion TLS 1.0/1.1|Allows weak TLS versions|minVersion TLSv1|minVersion.*TLSv1[^.3]"
 )
 
 CPP_API_PATTERNS=(
-	"CRITICAL|SSL_CTX_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_VERIFY_NONE|SSL_CTX_set_verify.*SSL_VERIFY_NONE"
-	"CRITICAL|SSL_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_set_verify SSL_VERIFY_NONE|SSL_set_verify.*SSL_VERIFY_NONE"
-	"HIGH|TLS1_VERSION|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLS1_VERSION|TLS1_VERSION[^_]"
-	"HIGH|TLS1_1_VERSION|TLS 1.1 has known vulnerabilities|TLS1_1_VERSION|TLS1_1_VERSION"
-	"HIGH|SSLv3_method|SSL 3.0 has known vulnerabilities (POODLE)|SSLv3_method|SSLv3_method"
-	"HIGH|TLSv1_method|TLS 1.0 has known vulnerabilities|TLSv1_method|TLSv1_method[^_]"
-	"MEDIUM|SSL_CTX_set_max_proto_version TLS1_2|Caps maximum TLS version at 1.2|SSL_CTX_set_max_proto_version TLS1_2_VERSION|SSL_CTX_set_max_proto_version.*TLS1_2_VERSION"
-	"INFO|SSL_CTX_set_min_proto_version TLS1_3|Forces TLS 1.3 (may break older clients)|SSL_CTX_set_min_proto_version TLS1_3_VERSION|SSL_CTX_set_min_proto_version.*TLS1_3_VERSION"
+	"SSL_CTX_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_VERIFY_NONE|SSL_CTX_set_verify.*SSL_VERIFY_NONE"
+	"SSL_set_verify SSL_VERIFY_NONE|Disables TLS certificate verification (MITM vulnerability)|SSL_set_verify SSL_VERIFY_NONE|SSL_set_verify.*SSL_VERIFY_NONE"
+	"TLS1_VERSION|TLS 1.0 has known vulnerabilities (POODLE, BEAST)|TLS1_VERSION|TLS1_VERSION[^_]"
+	"TLS1_1_VERSION|TLS 1.1 has known vulnerabilities|TLS1_1_VERSION|TLS1_1_VERSION"
+	"SSLv3_method|SSL 3.0 has known vulnerabilities (POODLE)|SSLv3_method|SSLv3_method"
+	"TLSv1_method|TLS 1.0 has known vulnerabilities|TLSv1_method|TLSv1_method[^_]"
 )
 
 # Get API patterns for a given language
@@ -866,9 +827,18 @@ scan_repo_api() {
 	local findings="[]"
 	local search_lang=$(get_search_language "$language")
 
+	# Check if repo is a fork (GitHub Code Search API doesn't index most forks)
+	local is_fork=$(gh api "repos/$repo" --jq '.fork' 2>/dev/null)
+	local use_tree_fallback=false
+
 	while IFS= read -r pattern_def; do
 		[ -z "$pattern_def" ] && continue
-		IFS='|' read -r severity pattern description search_query verify_regex <<<"$pattern_def"
+		IFS='|' read -r pattern description search_query verify_regex <<<"$pattern_def"
+
+		if [ "$use_tree_fallback" = true ]; then
+			# Already using tree fallback, skip API search
+			continue
+		fi
 
 		# Rate limit
 		api_rate_limit
@@ -886,6 +856,11 @@ scan_repo_api() {
 			--json path 2>/dev/null)
 
 		if [ -z "$search_result" ] || [ "$search_result" = "[]" ] || [ "$search_result" = "null" ]; then
+			# If this is a fork and first pattern returned no results, switch to tree fallback
+			if [ "$is_fork" = "true" ]; then
+				echo -e "\n      ${YELLOW}Warning: $repo is a fork (GitHub Code Search doesn't index forks). Using file tree fallback...${RESET}" >&2
+				use_tree_fallback=true
+			fi
 			continue
 		fi
 
@@ -921,9 +896,99 @@ scan_repo_api() {
 
 		# Add verified findings
 		if [ $verified_count -gt 0 ]; then
-			findings=$(echo "$findings" | jq --arg s "$severity" --arg p "$pattern" \
+			findings=$(echo "$findings" | jq --arg p "$pattern" \
 				--arg d "$description" --arg f "$verified_files" --arg c "$verified_count" --arg b "$branch" \
-				'. + [{severity: $s, pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
+				'. + [{pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
+		fi
+	done < <(get_api_patterns_for_language "$language")
+
+	# Fork fallback: fetch file tree and scan individual files
+	if [ "$use_tree_fallback" = true ]; then
+		findings=$(scan_fork_repo_api "$repo" "$branch" "$language" "$findings")
+	fi
+
+	echo "$findings"
+}
+
+# Fallback scanner for fork repos: fetch file tree via GitHub API, then check files individually
+scan_fork_repo_api() {
+	local repo="$1"
+	local branch="$2"
+	local language="$3"
+	local findings="$4"
+
+	# Get file extensions for this language
+	local extensions=""
+	case "$language" in
+	Go) extensions=".go" ;;
+	Python) extensions=".py" ;;
+	JavaScript) extensions=".js .mjs" ;;
+	TypeScript) extensions=".ts .mts" ;;
+	C++) extensions=".cpp .cc .cxx .h .hpp" ;;
+	esac
+
+	# Fetch the repo tree
+	local tree_json=$(gh api "repos/$repo/git/trees/$branch?recursive=1" --jq '.tree[] | select(.type == "blob") | .path' 2>/dev/null)
+
+	if [ -z "$tree_json" ]; then
+		return 0
+	fi
+
+	# Filter to relevant file extensions and exclude test/vendor paths
+	local relevant_files=""
+	while IFS= read -r filepath; do
+		[ -z "$filepath" ] && continue
+
+		# Check extension matches
+		local ext_match=false
+		for ext in $extensions; do
+			if [[ "$filepath" == *"$ext" ]]; then
+				ext_match=true
+				break
+			fi
+		done
+		$ext_match || continue
+
+		# Exclude test/vendor paths
+		should_exclude_path "$filepath" && continue
+
+		if [ -n "$relevant_files" ]; then
+			relevant_files="$relevant_files"$'\n'"$filepath"
+		else
+			relevant_files="$filepath"
+		fi
+	done <<<"$tree_json"
+
+	if [ -z "$relevant_files" ]; then
+		echo "$findings"
+		return 0
+	fi
+
+	# Check each pattern against the relevant files
+	while IFS= read -r pattern_def; do
+		[ -z "$pattern_def" ] && continue
+		IFS='|' read -r pattern description _ verify_regex <<<"$pattern_def"
+
+		local verified_files=""
+		local verified_count=0
+
+		while IFS= read -r filepath; do
+			[ -z "$filepath" ] && continue
+
+			if verify_match_in_file "$repo" "$branch" "$filepath" "$verify_regex"; then
+				if [ -n "$verified_files" ]; then
+					verified_files="$verified_files,$filepath"
+				else
+					verified_files="$filepath"
+				fi
+				verified_count=$((verified_count + 1))
+			fi
+		done <<<"$relevant_files"
+
+		if [ $verified_count -gt 0 ]; then
+			findings=$(echo "$findings" | jq --arg p "$pattern" \
+				--arg d "$description" --arg f "$verified_files" --arg c "$verified_count" --arg b "$branch" \
+				'. + [{pattern: $p, description: $d, files: $f, count: ($c|tonumber), branch: $b}]')
 		fi
 	done < <(get_api_patterns_for_language "$language")
 
@@ -982,17 +1047,16 @@ ORG_DATA_FILE=$(mktemp)
 # Temporary file to track per-org statistics (bash 3.x compatible)
 ORG_STATS_FILE=$(mktemp)
 
-# Arrays to store findings by severity
-declare -a CRITICAL_FINDINGS
-declare -a HIGH_FINDINGS
-declare -a MEDIUM_FINDINGS
-declare -a INFO_FINDINGS
+# Repos with findings (FAIL) vs without (PASS)
+FAIL_REPOS=0
+PASS_REPOS=0
 
 echo -e "${BLUE}${BOLD}SCANNING REPOSITORIES FOR TLS CONFIGURATION ISSUES${RESET}"
 echo -e "${BLUE}=======================================================${RESET}"
 echo -e "${YELLOW}Languages: Go, Python, JavaScript/TypeScript, C++${RESET}"
+echo -e "${YELLOW}Model: PASS/FAIL (any finding = FAIL)${RESET}"
 echo -e "${YELLOW}Checking for: certificate verification bypass, weak TLS versions,${RESET}"
-echo -e "${YELLOW}              version caps, deprecated options, and PQC readiness${RESET}"
+echo -e "${YELLOW}              hardcoded TLS config not using centralized profile${RESET}"
 echo -e "${BLUE}-------------------------------------------------------${RESET}"
 echo
 
@@ -1016,10 +1080,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 	echo
 
 	# Track results for this organization
-	ORG_CRITICAL=0
-	ORG_HIGH=0
-	ORG_MEDIUM=0
-	ORG_INFO=0
+	ORG_FINDINGS=0
 
 	while read -r repo branch language; do
 		# Skip empty lines
@@ -1057,24 +1118,17 @@ for ORG_NAME in "${ORGS[@]}"; do
 				# Parse cached findings
 				cached_findings=$(echo "$cached_result" | jq '.findings')
 				if [ "$cached_findings" != "null" ] && [ "$cached_findings" != "[]" ]; then
-					echo -e "${YELLOW}issues found (cached)${RESET}"
+					echo -e "${YELLOW}FAIL (cached)${RESET}"
 
-					# Count by severity from cache
-					for severity in CRITICAL HIGH MEDIUM INFO; do
-						count=$(echo "$cached_findings" | jq "[.[] | select(.severity == \"$severity\")] | length")
-						case $severity in
-						CRITICAL) ORG_CRITICAL=$((ORG_CRITICAL + count)) ;;
-						HIGH) ORG_HIGH=$((ORG_HIGH + count)) ;;
-						MEDIUM) ORG_MEDIUM=$((ORG_MEDIUM + count)) ;;
-						INFO) ORG_INFO=$((ORG_INFO + count)) ;;
-						esac
-					done
+					# Count findings from cache
+					local cached_count=$(echo "$cached_findings" | jq 'length')
+					ORG_FINDINGS=$((ORG_FINDINGS + cached_count))
 
 					# Store for report
-					echo "$ORG_NAME|$repo|$branch|$cached_findings" >>"$ORG_DATA_FILE"
+					echo "$ORG_NAME|$repo|$branch|$(echo "$cached_findings" | jq -c '.')" >>"$ORG_DATA_FILE"
 					continue
 				elif [ "$cached_findings" = "[]" ]; then
-					echo -e "${GREEN}no issues (cached)${RESET}"
+					echo -e "${GREEN}PASS (cached)${RESET}"
 					continue
 				fi
 			fi
@@ -1098,49 +1152,136 @@ for ORG_NAME in "${ORGS[@]}"; do
 		fi
 
 		if [ -z "$findings" ] || [ "$findings" = "[]" ] || [ "$findings" = "null" ]; then
-			echo -e "${GREEN}no issues found${RESET}"
+			echo -e "${GREEN}PASS${RESET}"
 			update_cache_result "$repo" "[]" "$branch" "$language"
 		else
 			finding_count=$(echo "$findings" | jq 'length')
-			echo -e "${YELLOW}${finding_count} issue(s) found${RESET}"
+			echo -e "${RED}FAIL (${finding_count} finding(s))${RESET}"
 
 			# Update cache
 			update_cache_result "$repo" "$findings" "$branch" "$language"
 
-			# Count by severity
-			for severity in CRITICAL HIGH MEDIUM INFO; do
-				count=$(echo "$findings" | jq "[.[] | select(.severity == \"$severity\")] | length")
-				case $severity in
-				CRITICAL) ORG_CRITICAL=$((ORG_CRITICAL + count)) ;;
-				HIGH) ORG_HIGH=$((ORG_HIGH + count)) ;;
-				MEDIUM) ORG_MEDIUM=$((ORG_MEDIUM + count)) ;;
-				INFO) ORG_INFO=$((ORG_INFO + count)) ;;
-				esac
-			done
+			# Count findings
+			ORG_FINDINGS=$((ORG_FINDINGS + finding_count))
 
 			# Store for report
-			echo "$ORG_NAME|$repo|$branch|$findings" >>"$ORG_DATA_FILE"
+			echo "$ORG_NAME|$repo|$branch|$(echo "$findings" | jq -c '.')" >>"$ORG_DATA_FILE"
 		fi
 
 	done <<<"$REPOS"
 
 	# Update global counters
-	CRITICAL_COUNT=$((CRITICAL_COUNT + ORG_CRITICAL))
-	HIGH_COUNT=$((HIGH_COUNT + ORG_HIGH))
-	MEDIUM_COUNT=$((MEDIUM_COUNT + ORG_MEDIUM))
-	INFO_COUNT=$((INFO_COUNT + ORG_INFO))
+	TOTAL_FINDINGS=$((TOTAL_FINDINGS + ORG_FINDINGS))
 
 	# Track total issues for this org and save to stats file
-	ORG_TOTAL_ISSUES=$((ORG_CRITICAL + ORG_HIGH + ORG_MEDIUM + ORG_INFO))
-	echo "${ORG_NAME}|${REPO_COUNT}|${ORG_TOTAL_ISSUES}" >>"$ORG_STATS_FILE"
+	echo "${ORG_NAME}|${REPO_COUNT}|${ORG_FINDINGS}" >>"$ORG_STATS_FILE"
 
 	# Summary for this organization
 	echo
 	echo -e "${YELLOW}${BOLD}Summary for ${ORG_NAME}:${RESET}"
-	echo -e "   ${RED}CRITICAL: ${ORG_CRITICAL}${RESET} | ${YELLOW}HIGH: ${ORG_HIGH}${RESET} | ${BLUE}MEDIUM: ${ORG_MEDIUM}${RESET} | INFO: ${ORG_INFO}"
+	if [ "$ORG_FINDINGS" -gt 0 ]; then
+		echo -e "   ${RED}FAIL: ${ORG_FINDINGS} finding(s)${RESET}"
+	else
+		echo -e "   ${GREEN}PASS: No findings${RESET}"
+	fi
 	echo -e "${BLUE}-------------------------------------------------------${RESET}"
 	echo
 done
+
+#===============================================================================
+# SCAN EXPLICIT REPO LIST (fork repos and manually added repos)
+#===============================================================================
+
+if [ -f "$REPO_LIST_FILE" ]; then
+	echo -e "${YELLOW}${BOLD}Scanning explicit repo list: ${REPO_LIST_FILE}${RESET}"
+	echo
+
+	while IFS= read -r line || [ -n "$line" ]; do
+		# Skip empty lines and comments
+		[[ -z "$line" || "$line" =~ ^[[:space:]]*(#|//) ]] && continue
+
+		# Normalize the repo name
+		repo=$(echo "$line" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		[ -z "$repo" ] && continue
+
+		# Check if this repo was already scanned in the org loop
+		if [ -f "$RESULTS_CACHE" ]; then
+			cached=$(jq -r ".repositories[\"$repo\"] // null" "$RESULTS_CACHE" 2>/dev/null)
+			if [ "$cached" != "null" ]; then
+				echo -e "   ${repo}... ${BLUE}already scanned${RESET}"
+				continue
+			fi
+		fi
+
+		# Check if repo is blocklisted
+		if is_blocklisted "$repo"; then
+			echo -e "   ${repo}... ${BLUE}skipped (blocklisted)${RESET}"
+			continue
+		fi
+
+		# Get repo info (branch, language)
+		repo_info=$(gh api "repos/$repo" --jq '{branch: .default_branch, language: .language, archived: .archived, fork: .fork}' 2>/dev/null)
+		if [ -z "$repo_info" ]; then
+			echo -e "   ${repo}... ${RED}not found${RESET}"
+			continue
+		fi
+
+		branch=$(echo "$repo_info" | jq -r '.branch')
+		language=$(echo "$repo_info" | jq -r '.language')
+		is_archived=$(echo "$repo_info" | jq -r '.archived')
+		is_fork=$(echo "$repo_info" | jq -r '.fork')
+
+		if [ "$is_archived" = "true" ]; then
+			echo -e "   ${repo}... ${BLUE}skipped (archived)${RESET}"
+			continue
+		fi
+
+		# Normalize language name
+		case "$language" in
+		Go | C++ | JavaScript | TypeScript | Python) ;;
+		*)
+			echo -e "   ${repo} [${language}]... ${BLUE}skipped (unsupported language)${RESET}"
+			continue
+			;;
+		esac
+
+		echo -ne "   ${repo} [${language}] on branch ${branch}"
+		[ "$is_fork" = "true" ] && echo -ne " (fork)"
+		echo -ne "... "
+
+		TOTAL_REPOS=$((TOTAL_REPOS + 1))
+
+		# Perform scanning based on mode
+		if [ "$SCAN_MODE" = "api" ]; then
+			findings=$(scan_repo_api "$repo" "$branch" "$language")
+		else
+			repo_path=$(ensure_repo_updated "$repo" "$branch")
+			if [ -z "$repo_path" ] || [ ! -d "$repo_path" ]; then
+				echo -e "${RED}clone failed${RESET}"
+				CLONE_FAILURES=$((CLONE_FAILURES + 1))
+				continue
+			fi
+			findings=$(scan_local_repo "$repo_path" "$branch" "$language")
+		fi
+
+		if [ -z "$findings" ] || [ "$findings" = "[]" ] || [ "$findings" = "null" ]; then
+			echo -e "${GREEN}PASS${RESET}"
+			update_cache_result "$repo" "[]" "$branch" "$language"
+		else
+			finding_count=$(echo "$findings" | jq 'length')
+			echo -e "${RED}FAIL (${finding_count} finding(s))${RESET}"
+			update_cache_result "$repo" "$findings" "$branch" "$language"
+			TOTAL_FINDINGS=$((TOTAL_FINDINGS + finding_count))
+
+			# Determine org for reporting
+			local_org="${repo%%/*}"
+			echo "$local_org|$repo|$branch|$(echo "$findings" | jq -c '.')" >>"$ORG_DATA_FILE"
+		fi
+	done <"$REPO_LIST_FILE"
+
+	echo -e "${BLUE}-------------------------------------------------------${RESET}"
+	echo
+fi
 
 # Sort and deduplicate caches
 if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
@@ -1148,7 +1289,7 @@ if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
 fi
 
 # Calculate totals
-TOTAL_ISSUES=$((CRITICAL_COUNT + HIGH_COUNT + MEDIUM_COUNT + INFO_COUNT))
+TOTAL_ISSUES=$TOTAL_FINDINGS
 REPOS_WITH_ISSUES=$(wc -l <"$ORG_DATA_FILE" 2>/dev/null | tr -d ' ')
 REPOS_WITH_ISSUES=${REPOS_WITH_ISSUES:-0}
 
@@ -1163,11 +1304,11 @@ fi
 echo -e "${BOLD}   Scan mode:${RESET} ${SCAN_MODE}"
 echo -e "${BOLD}   Repositories with issues:${RESET} ${YELLOW}${REPOS_WITH_ISSUES}${RESET}"
 echo
-echo -e "${BOLD}${BLUE}FINDINGS BY SEVERITY:${RESET}"
-echo -e "   ${RED}CRITICAL:${RESET} ${CRITICAL_COUNT}"
-echo -e "   ${YELLOW}HIGH:${RESET} ${HIGH_COUNT}"
-echo -e "   ${BLUE}MEDIUM:${RESET} ${MEDIUM_COUNT}"
-echo -e "   INFO: ${INFO_COUNT}"
+if [ "$REPOS_WITH_ISSUES" -gt 0 ]; then
+	echo -e "${BOLD}${RED}RESULT: FAIL${RESET} (${TOTAL_ISSUES} finding(s) in ${REPOS_WITH_ISSUES} repos)"
+else
+	echo -e "${BOLD}${GREEN}RESULT: PASS${RESET} (all repos compliant)"
+fi
 echo
 
 #===============================================================================
@@ -1183,20 +1324,13 @@ echo "Generating markdown report: $OUTPUT_MD"
 	echo "## Summary"
 	echo ""
 	echo "- **Total repositories scanned:** ${TOTAL_REPOS}"
-	echo "- **Repositories with issues:** ${REPOS_WITH_ISSUES}"
-	echo "- **Critical issues:** ${CRITICAL_COUNT}"
-	echo "- **High issues:** ${HIGH_COUNT}"
-	echo "- **Medium issues:** ${MEDIUM_COUNT}"
-	echo "- **Info issues:** ${INFO_COUNT}"
+	echo "- **Repositories with findings (FAIL):** ${REPOS_WITH_ISSUES}"
+	echo "- **Total findings:** ${TOTAL_ISSUES}"
 	echo ""
-	echo "## Severity Levels"
+	echo "## Pass/Fail Model"
 	echo ""
-	echo "| Severity | Description |"
-	echo "|----------|-------------|"
-	echo "| CRITICAL | Certificate verification disabled (InsecureSkipVerify, verify=False, rejectUnauthorized: false, SSL_VERIFY_NONE) |"
-	echo "| HIGH | TLS 1.0/1.1 protocol version usage - Known vulnerabilities (POODLE, BEAST) |"
-	echo "| MEDIUM | MaxVersion capped at TLS 1.2 - Prevents TLS 1.3 negotiation |"
-	echo "| INFO | TLS 1.3 forced, deprecated options, CurvePreferences, Hardcoded tls.Config, PQC/ML-KEM |"
+	echo "Any hardcoded TLS configuration that does not dynamically inherit from the cluster's"
+	echo "centralized \`tlsSecurityProfile\` is a **FAIL**. This aligns with CNF-21745 requirements."
 	echo ""
 
 	if [ "$REPOS_WITH_ISSUES" -gt 0 ]; then
@@ -1206,7 +1340,7 @@ echo "Generating markdown report: $OUTPUT_MD"
 		# Create temp jq file for reliable query execution (with file hyperlinks)
 		JQ_MD_TABLE=$(mktemp)
 		cat >"$JQ_MD_TABLE" <<'JQEOF'
-.repositories | to_entries | map(select(.value.findings | length > 0)) | map(select(.key | startswith($org + "/"))) | .[] | .key as $repo | .value.branch as $branch | .value.findings[] | select(.severity == $sev) |
+.repositories | to_entries | map(select(.value.findings | length > 0)) | map(select(.key | startswith($org + "/"))) | .[] | .key as $repo | .value.branch as $branch | .value.findings[] |
   # Build file link - show first file as hyperlink, add count if more
   (.files | split(",") | .[0]) as $first_file |
   (.files | split(",") | length) as $file_count |
@@ -1222,120 +1356,36 @@ JQEOF
 			# Count total issues for this org
 			org_issue_count=$(jq -r --arg org "$org" '[.repositories | to_entries | map(select(.key | startswith($org + "/"))) | .[].value.findings[]?] | length' "$RESULTS_CACHE" 2>/dev/null)
 
-			echo "### Organization: ${org} (${org_issue_count} issues)"
+			echo "### Organization: ${org} (${org_issue_count} findings - FAIL)"
 			echo ""
+			echo "| Repository | Pattern | Files | Description |"
+			echo "|------------|---------|-------|-------------|"
 
-			# Group by severity within this org
-			for severity in CRITICAL HIGH MEDIUM INFO; do
-				# Check if there are findings for this severity in this org
-				severity_count=$(jq -r --arg sev "$severity" --arg org "$org" '[.repositories | to_entries | map(select(.key | startswith($org + "/"))) | .[].value.findings[]? | select(.severity == $sev)] | length' "$RESULTS_CACHE" 2>/dev/null)
+			jq -r --arg org "$org" -f "$JQ_MD_TABLE" "$RESULTS_CACHE" 2>/dev/null
 
-				if [ "$severity_count" -gt 0 ]; then
-					echo "#### ${severity} (${severity_count})"
-					echo ""
-					echo "| Repository | Pattern | Files | Description |"
-					echo "|------------|---------|-------|-------------|"
-
-					jq -r --arg sev "$severity" --arg org "$org" -f "$JQ_MD_TABLE" "$RESULTS_CACHE" 2>/dev/null
-
-					echo ""
-				fi
-			done
+			echo ""
 		done
 
 		rm -f "$JQ_MD_TABLE"
 
-		echo "## Remediation Guide"
+		echo "## Remediation"
 		echo ""
-		echo "### Critical: Certificate Verification Disabled"
+		echo "All findings indicate TLS configurations that should use the cluster's centralized"
+		echo "\`tlsSecurityProfile\` instead of hardcoded settings (CNF-21745)."
 		echo ""
-		echo "**Never** disable certificate verification in production code. This makes connections vulnerable to man-in-the-middle attacks."
+		echo "### Certificate Verification"
 		echo ""
-		echo "#### Go: InsecureSkipVerify"
+		echo "Never disable certificate verification. Remove \`InsecureSkipVerify: true\`,"
+		echo "\`verify=False\`, \`rejectUnauthorized: false\`, or \`SSL_VERIFY_NONE\`."
 		echo ""
-		echo "\`\`\`go"
-		echo "// BAD - DO NOT USE IN PRODUCTION"
-		echo "tlsConfig := &tls.Config{"
-		echo "    InsecureSkipVerify: true, // VULNERABLE"
-		echo "}"
+		echo "### Weak TLS Versions"
 		echo ""
-		echo "// GOOD - Verify certificates properly"
-		echo "tlsConfig := &tls.Config{"
-		echo "    RootCAs: customCertPool, // Or use system CA"
-		echo "}"
-		echo "\`\`\`"
+		echo "Remove references to TLS 1.0/1.1. Use TLS 1.2 minimum."
 		echo ""
-		echo "#### Python: verify=False / CERT_NONE"
+		echo "### Hardcoded tls.Config"
 		echo ""
-		echo "\`\`\`python"
-		echo "# BAD - DO NOT USE IN PRODUCTION"
-		echo "requests.get(url, verify=False)  # VULNERABLE"
-		echo "ctx = ssl.create_default_context()"
-		echo "ctx.check_hostname = False  # VULNERABLE"
-		echo "ctx.verify_mode = ssl.CERT_NONE  # VULNERABLE"
-		echo ""
-		echo "# GOOD - Verify certificates properly"
-		echo "requests.get(url, verify=True)  # Default"
-		echo "requests.get(url, verify='/path/to/ca-bundle.crt')  # Custom CA"
-		echo "ctx = ssl.create_default_context()  # Verifies by default"
-		echo "\`\`\`"
-		echo ""
-		echo "#### Node.js: rejectUnauthorized: false"
-		echo ""
-		echo "\`\`\`javascript"
-		echo "// BAD - DO NOT USE IN PRODUCTION"
-		echo "const agent = new https.Agent({ rejectUnauthorized: false }); // VULNERABLE"
-		echo "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // VULNERABLE"
-		echo ""
-		echo "// GOOD - Verify certificates properly"
-		echo "const agent = new https.Agent({ ca: fs.readFileSync('ca.pem') });"
-		echo "\`\`\`"
-		echo ""
-		echo "#### C++: SSL_VERIFY_NONE"
-		echo ""
-		echo "\`\`\`cpp"
-		echo "// BAD - DO NOT USE IN PRODUCTION"
-		echo "SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL); // VULNERABLE"
-		echo ""
-		echo "// GOOD - Verify certificates properly"
-		echo "SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);"
-		echo "SSL_CTX_load_verify_locations(ctx, \"ca.pem\", NULL);"
-		echo "\`\`\`"
-		echo ""
-		echo "### High: Weak TLS Versions"
-		echo ""
-		echo "TLS 1.0 and 1.1 have known vulnerabilities (POODLE, BEAST) and should not be used."
-		echo ""
-		echo "\`\`\`go"
-		echo "// BAD"
-		echo "tlsConfig := &tls.Config{"
-		echo "    MinVersion: tls.VersionTLS10, // VULNERABLE"
-		echo "}"
-		echo ""
-		echo "// GOOD - Use TLS 1.2 minimum, prefer 1.3"
-		echo "tlsConfig := &tls.Config{"
-		echo "    MinVersion: tls.VersionTLS12,"
-		echo "}"
-		echo "\`\`\`"
-		echo ""
-		echo "### Medium: TLS 1.2 Cap"
-		echo ""
-		echo "Capping MaxVersion at TLS 1.2 prevents TLS 1.3 negotiation."
-		echo ""
-		echo "\`\`\`go"
-		echo "// Consider removing MaxVersion to allow TLS 1.3"
-		echo "tlsConfig := &tls.Config{"
-		echo "    MinVersion: tls.VersionTLS12,"
-		echo "    // Don't set MaxVersion unless necessary"
-		echo "}"
-		echo "\`\`\`"
-		echo ""
-		echo "### Info: Go-Specific"
-		echo ""
-		echo "- **PreferServerCipherSuites**: Deprecated in Go 1.17, now a no-op"
-		echo "- **CurvePreferences**: PQC readiness indicator for ML-KEM migration"
-		echo "- **Hardcoded tls.Config**: Review for TLS profile adherence"
-		echo "- **PQC/ML-KEM**: Post-quantum cryptography adoption (no action needed)"
+		echo "Use the centralized \`TLSSecurityProfile\` from the API server instead of"
+		echo "hardcoding \`tls.Config{}\` structs."
 		echo ""
 	else
 		echo "## All Clear!"
@@ -1368,17 +1418,12 @@ if [ "$UPDATE_TRACKING" = true ]; then
 ## Summary
 
 - **Total Repositories Scanned:** ${TOTAL_REPOS}
-- **Repositories with Issues:** ${REPOS_WITH_ISSUES}
-- **Critical:** ${CRITICAL_COUNT} | **High:** ${HIGH_COUNT} | **Medium:** ${MEDIUM_COUNT} | **Info:** ${INFO_COUNT}
+- **Repositories with Findings (FAIL):** ${REPOS_WITH_ISSUES}
+- **Total Findings:** ${TOTAL_ISSUES}
 
-### Severity Legend
+### Model
 
-| Severity | Meaning |
-|----------|---------|
-| CRITICAL | Certificate verification disabled (InsecureSkipVerify, verify=False, rejectUnauthorized: false, SSL_VERIFY_NONE) |
-| HIGH | TLS 1.0/1.1 protocol version usage - Known vulnerabilities |
-| MEDIUM | MaxVersion capped at TLS 1.2 - Prevents TLS 1.3 |
-| INFO | TLS 1.3 forced, deprecated options, CurvePreferences, Hardcoded tls.Config, PQC/ML-KEM |
+**PASS/FAIL** - Any hardcoded TLS configuration that does not dynamically inherit from the cluster's centralized \`tlsSecurityProfile\` is a FAIL (CNF-21745).
 
 ---
 
@@ -1407,7 +1452,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 "
 		elif [ "$issue_count" -eq 0 ]; then
 			# Fully compliant
-			ISSUE_BODY+="| ${org} | ${repo_count} | ✅ Compliant |
+			ISSUE_BODY+="| ${org} | ${repo_count} | ✅ PASS |
 "
 			if [ -n "$COMPLIANT_ORGS" ]; then
 				COMPLIANT_ORGS+="
@@ -1416,8 +1461,8 @@ if [ "$UPDATE_TRACKING" = true ]; then
 				COMPLIANT_ORGS="- **${org}** (${repo_count} repositories)"
 			fi
 		else
-			# Has issues
-			ISSUE_BODY+="| ${org} | ${repo_count} | ⚠️ ${issue_count} issues |
+			# Has findings
+			ISSUE_BODY+="| ${org} | ${repo_count} | ❌ FAIL (${issue_count} findings) |
 "
 		fi
 	done
@@ -1427,9 +1472,9 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 	# Add compliant orgs highlight if any
 	if [ -n "$COMPLIANT_ORGS" ]; then
-		ISSUE_BODY+="### ✅ Fully Compliant Organizations
+		ISSUE_BODY+="### ✅ Passing Organizations
 
-The following organizations have no TLS configuration issues:
+The following organizations have no TLS findings:
 ${COMPLIANT_ORGS}
 
 ---
@@ -1441,7 +1486,7 @@ ${COMPLIANT_ORGS}
 		# Create temp jq file for reliable query execution (with file hyperlinks)
 		JQ_ISSUE_TABLE=$(mktemp)
 		cat >"$JQ_ISSUE_TABLE" <<'JQEOF'
-.repositories | to_entries | map(select(.value.findings | length > 0)) | map(select(.key | startswith($org + "/"))) | .[] | .key as $repo | .value.branch as $branch | .value.findings[] | select(.severity == $sev) |
+.repositories | to_entries | map(select(.value.findings | length > 0)) | map(select(.key | startswith($org + "/"))) | .[] | .key as $repo | .value.branch as $branch | .value.findings[] |
   # Build file link - show first file as hyperlink, add count if more
   (.files | split(",") | .[0]) as $first_file |
   (.files | split(",") | length) as $file_count |
@@ -1454,70 +1499,39 @@ JQEOF
 		ORGS_WITH_FINDINGS=$(jq -r '.repositories | to_entries | map(select(.value.findings | length > 0)) | .[].key | split("/")[0]' "$RESULTS_CACHE" 2>/dev/null | sort -u)
 
 		for org in $ORGS_WITH_FINDINGS; do
-			# Count total issues for this org
+			# Count total findings for this org
 			org_issue_count=$(jq -r --arg org "$org" '[.repositories | to_entries | map(select(.key | startswith($org + "/"))) | .[].value.findings[]?] | length' "$RESULTS_CACHE" 2>/dev/null)
 
-			ISSUE_BODY+="## Organization: ${org} (${org_issue_count} issues)
-
-"
-
-			# Group by severity within this org
-			for severity in CRITICAL HIGH MEDIUM INFO; do
-				# Check if there are findings for this severity in this org
-				severity_count=$(jq -r --arg sev "$severity" --arg org "$org" '[.repositories | to_entries | map(select(.key | startswith($org + "/"))) | .[].value.findings[]? | select(.severity == $sev)] | length' "$RESULTS_CACHE" 2>/dev/null)
-
-				if [ "$severity_count" -gt 0 ]; then
-					ISSUE_BODY+="### ${severity} (${severity_count})
+			ISSUE_BODY+="## Organization: ${org} (${org_issue_count} findings - FAIL)
 
 | Repository | Pattern | Files |
 |------------|---------|-------|
 "
-					# Generate table rows from results cache (limit to 30 rows per section)
-					TABLE_ROWS=$(jq -r --arg sev "$severity" --arg org "$org" -f "$JQ_ISSUE_TABLE" "$RESULTS_CACHE" 2>/dev/null | head -30)
+			# Generate table rows from results cache (limit to 30 rows per section)
+			TABLE_ROWS=$(jq -r --arg org "$org" -f "$JQ_ISSUE_TABLE" "$RESULTS_CACHE" 2>/dev/null | head -30)
 
-					ISSUE_BODY+="${TABLE_ROWS}
+			ISSUE_BODY+="${TABLE_ROWS}
 
 "
-				fi
-			done
 		done
 
 		rm -f "$JQ_ISSUE_TABLE"
 
 		ISSUE_BODY+="---
 
-## Remediation Guide
+## Remediation
 
-### Critical: Certificate Verification Disabled
+All findings indicate TLS configurations that should use the cluster's centralized \`tlsSecurityProfile\` instead of hardcoded settings (CNF-21745).
 
-**Never** disable certificate verification in production. This enables MITM attacks.
-
-**Go:** Remove \`InsecureSkipVerify: true\` and use proper CA certificates.
-**Python:** Remove \`verify=False\`, \`CERT_NONE\`, and \`_create_unverified_context\`. Use \`verify=True\` (default).
-**Node.js:** Remove \`rejectUnauthorized: false\` and \`NODE_TLS_REJECT_UNAUTHORIZED='0'\`. Use proper CA config.
-**C++:** Replace \`SSL_VERIFY_NONE\` with \`SSL_VERIFY_PEER\` and load CA certificates.
-
-### High: Weak TLS Versions
-
-Use TLS 1.2 minimum. Remove references to TLS 1.0/1.1 protocol versions.
-
-\`\`\`go
-tlsConfig := &tls.Config{
-    MinVersion: tls.VersionTLS12,
-}
-\`\`\`
-
-### Go-Specific: PQC Readiness
-
-**CurvePreferences:** PQC readiness indicator. Add \`X25519MLKEM768\` when ML-KEM support is available.
-**Hardcoded tls.Config:** Prefer consuming \`TLSSecurityProfile\` from the API server.
-**PQC/ML-KEM:** Repos using ML-KEM identifiers are already preparing for post-quantum cryptography.
+- **Certificate Verification:** Never disable it. Remove InsecureSkipVerify, verify=False, rejectUnauthorized: false, SSL_VERIFY_NONE.
+- **Weak TLS Versions:** Remove TLS 1.0/1.1 references. Use TLS 1.2 minimum.
+- **Hardcoded tls.Config:** Use the centralized \`TLSSecurityProfile\` from the API server.
 
 "
 	else
-		ISSUE_BODY+="## All Clear!
+		ISSUE_BODY+="## Result: PASS
 
-No TLS configuration issues found in any scanned repositories.
+All scanned repositories are compliant. No hardcoded TLS configuration issues found.
 
 "
 	fi
@@ -1526,26 +1540,10 @@ No TLS configuration issues found in any scanned repositories.
 
 ## Resources
 
-**TLS 1.3 Documentation:**
 - [RFC 8446 - TLS 1.3 Specification](https://datatracker.ietf.org/doc/html/rfc8446)
 - [OWASP TLS Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html)
-- [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/)
-
-**Language-Specific TLS Documentation:**
-- [Go crypto/tls Package](https://pkg.go.dev/crypto/tls)
-- [Python ssl Module](https://docs.python.org/3/library/ssl.html)
-- [Node.js TLS Module](https://nodejs.org/api/tls.html)
-- [OpenSSL Documentation](https://www.openssl.org/docs/)
-
-**Security Advisories:**
-- [POODLE Attack (CVE-2014-3566)](https://nvd.nist.gov/vuln/detail/CVE-2014-3566) - SSL 3.0/TLS 1.0 vulnerability
-- [BEAST Attack (CVE-2011-3389)](https://nvd.nist.gov/vuln/detail/CVE-2011-3389) - TLS 1.0 vulnerability
-
-**Post-Quantum Cryptography (PQC):**
-- [NIST FIPS 203 - ML-KEM Standard](https://csrc.nist.gov/pubs/fips/203/final) - Module-Lattice-Based Key Encapsulation
-- [Go crypto/mlkem Package](https://pkg.go.dev/crypto/mlkem) - Go standard library PQC support
-- [Kubernetes PQC Blog Post](https://kubernetes.io/blog/2025/04/14/kubernetes-pqc-guidelines/) - Post-Quantum Cryptography guidelines
-- [OpenShift TLSSecurityProfile Docs](https://docs.openshift.com/container-platform/latest/security/tls-security-profiles.html) - Centralized TLS profile management
+- [OpenShift TLSSecurityProfile Docs](https://docs.openshift.com/container-platform/latest/security/tls-security-profiles.html)
+- [CNF-21745 - OCP 4.22 TLS Compliance](https://issues.redhat.com/browse/CNF-21745)
 
 ---
 
