@@ -300,21 +300,35 @@ is_version_stable() {
 	fi
 }
 
-# Function to check if a version is acceptable (meets OCP baseline or is stable)
-# Uses OCP recommended version as baseline when available, falls back to is_version_stable
+# Function to check if a version is acceptable (stable on go.dev OR >= OCP recommended version)
 is_version_acceptable() {
 	local version=$1
+	# Normalize version format (remove 'go' prefix if present)
 	version=$(echo "$version" | sed 's/^go//')
+
+	# First check: is it stable on go.dev?
+	if is_version_stable "$version"; then
+		return 0
+	fi
+
+	# Second check: is it >= OCP recommended version?
 	if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
-		local repo_major=$(echo "$version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+		local major_version=$(echo "$version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 		local ocp_major=$(echo "$OPENSHIFT_K8S_GO_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-		if version_lt "$repo_major" "$ocp_major"; then
-			return 1 # below OCP → outdated
+		if [ "$CHECK_MINOR" = true ]; then
+			# For minor check, compare full version against OCP version
+			if ! version_lt "$version" "$OPENSHIFT_K8S_GO_VERSION"; then
+				return 0
+			fi
 		else
-			return 0 # at or above OCP → acceptable
+			# For major check, compare major versions
+			if ! version_lt "$major_version" "$ocp_major"; then
+				return 0
+			fi
 		fi
 	fi
-	is_version_stable "$version"
+
+	return 1
 }
 
 # Function to extract Go version from go.mod content
@@ -322,6 +336,12 @@ extract_go_version() {
 	local go_mod=$1
 	# Look for 'go 1.XX' or 'go 1.XX.YY' line in go.mod
 	echo "$go_mod" | grep -E '^go[[:space:]]+[0-9]+\.[0-9]+' | awk '{print $2}' | head -1
+}
+
+# Function to extract toolchain version from go.mod content
+extract_toolchain_version() {
+	local go_mod=$1
+	echo "$go_mod" | grep -E '^toolchain[[:space:]]+go[0-9]+\.[0-9]+' | sed -E 's/^toolchain[[:space:]]+go//' | head -1
 }
 
 # Function to compare two Go versions (returns 0 if v1 < v2, 1 if v1 >= v2)
@@ -433,23 +453,53 @@ create_github_issue() {
 	local repo=$1
 	local current_version=$2
 	local latest_stable=$3
+	local has_toolchain=$4 # "true" if repo has a toolchain directive
 
 	# Remove 'go' prefix from versions for display (go1.19 -> 1.19)
 	local current_display="${current_version#go}"
 
-	# Find the lowest stable version above the current version
+	# Determine recommended version: use OCP version when available, otherwise find lowest stable above current
 	local recommended_version
-	recommended_version=$(find_lowest_stable_above "$current_version")
-
-	# Fallback to latest stable if no recommended version found (shouldn't happen, but safety check)
-	if [ -z "$recommended_version" ]; then
-		recommended_version="${latest_stable#go}"
-		if [ "$CHECK_MINOR" = false ]; then
-			recommended_version=$(echo "$recommended_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+	if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+		recommended_version="$OPENSHIFT_K8S_GO_VERSION"
+	else
+		recommended_version=$(find_lowest_stable_above "$current_version")
+		# Fallback to latest stable if no recommended version found (shouldn't happen, but safety check)
+		if [ -z "$recommended_version" ]; then
+			recommended_version="${latest_stable#go}"
+			if [ "$CHECK_MINOR" = false ]; then
+				recommended_version=$(echo "$recommended_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+			fi
 		fi
 	fi
 
-	local issue_title="Update Go version from ${current_display} to ${recommended_version}"
+	# Build issue title and recommended action based on toolchain status
+	local issue_title
+	local recommended_action_text
+
+	if [ "$has_toolchain" = "true" ]; then
+		issue_title="Update Go toolchain from ${current_display} to ${recommended_version}"
+		if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+			recommended_action_text="Please update the \`toolchain\` directive in \`go.mod\` to use a stable version of Go. We recommend \`toolchain go${OPENSHIFT_K8S_GO_VERSION}\`, which is the version used by OpenShift Kubernetes.
+
+> **Note:** The \`go\` directive in \`go.mod\` is a minimum language compatibility marker, not the build version. The \`toolchain\` directive (Go 1.21+) controls the actual Go version used for builds. Updating \`toolchain\` avoids cascading effects on downstream importers."
+		else
+			recommended_action_text="Please update the \`toolchain\` directive in \`go.mod\` to use a stable version of Go. The recommended minimum is \`toolchain go${recommended_version}\` (latest stable is \`${latest_stable#go}\`).
+
+> **Note:** The \`go\` directive in \`go.mod\` is a minimum language compatibility marker, not the build version. The \`toolchain\` directive (Go 1.21+) controls the actual Go version used for builds. Updating \`toolchain\` avoids cascading effects on downstream importers."
+		fi
+	else
+		issue_title="Add Go toolchain directive at ${recommended_version}"
+		if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+			recommended_action_text="Please add a \`toolchain\` directive to \`go.mod\` specifying a stable version of Go. We recommend adding \`toolchain go${OPENSHIFT_K8S_GO_VERSION}\`, which is the version used by OpenShift Kubernetes.
+
+> **Note:** The \`go\` directive in \`go.mod\` is a minimum language compatibility marker, not the build version. The \`toolchain\` directive (Go 1.21+) is the correct way to specify the build version. Adding \`toolchain\` avoids bumping the \`go\` directive, which can cause cascading effects on downstream importers."
+		else
+			recommended_action_text="Please add a \`toolchain\` directive to \`go.mod\` specifying a stable version of Go. The recommended minimum is \`toolchain go${recommended_version}\` (latest stable is \`${latest_stable#go}\`).
+
+> **Note:** The \`go\` directive in \`go.mod\` is a minimum language compatibility marker, not the build version. The \`toolchain\` directive (Go 1.21+) is the correct way to specify the build version. Adding \`toolchain\` avoids bumping the \`go\` directive, which can cause cascading effects on downstream importers."
+		fi
+	fi
 
 	# Build Kubernetes version reference
 	local k8s_version_text=""
@@ -468,23 +518,15 @@ create_github_issue() {
 "
 	fi
 
-	# Build recommended action text
-	local recommended_action_text=""
-	if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
-		recommended_action_text="Please update the \`go.mod\` file to use a stable version of Go. We recommend using Go \`${OPENSHIFT_K8S_GO_VERSION}\`, which is the version used by OpenShift Kubernetes."
-	else
-		recommended_action_text="Please update the \`go.mod\` file to use a stable version of Go. The recommended minimum stable version is \`${recommended_version}\` (latest stable is \`${latest_stable#go}\`)."
-	fi
-
 	local issue_body="## Go Version Update Recommended
 
-This repository is currently using Go version \`${current_display}\`, which is listed in the archived versions on [go.dev/dl/](https://go.dev/dl/).
+This repository is currently using Go version \`${current_display}\`, which is below the OCP recommended version (\`${recommended_version}\`).
 
 ### Current Status
 - **Current Version**: \`${current_version}\`
 - **Recommended Version**: \`${recommended_version}\`
 - **Latest Stable**: \`${latest_stable#go}\`
-- **Status**: ⚠️ Outdated (archived)
+- **Status**: ⚠️ Outdated (below OCP recommended)
 ${k8s_version_text}
 ### Recommended Action
 ${recommended_action_text}
@@ -492,13 +534,14 @@ ${recommended_action_text}
 ### Resources
 - [Go Downloads](https://go.dev/dl/)
 - [Go Release History](https://go.dev/doc/devel/release)
+- [Go Toolchain Documentation](https://go.dev/doc/toolchain)
 
 ---
 *[This issue was automatically generated by the Go Version Checker script.](https://github.com/${TRACKING_REPO}/blob/main/scripts/go-version-checker.sh)*"
 
 	# Check if an issue already exists with a similar title (search both open and closed)
 	echo -ne "      Checking for existing issue on ${repo}... " >&2
-	local existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state all --json number,title,state --jq ".[] | select(.title | test(\"Update Go version from\")) | \"\(.number)|\(.state)\"" | head -1)
+	local existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state all --json number,title,state --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | \"\(.number)|\(.state)\"" | head -1)
 
 	if [ -n "$existing_issue" ]; then
 		local issue_number=$(echo "$existing_issue" | cut -d'|' -f1)
@@ -546,8 +589,8 @@ close_github_issue() {
 	local repo=$1
 	local current_version=$2
 
-	# Check if an issue exists
-	local existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+	# Check if an issue exists (match all title formats: "Update Go version from", "Update Go toolchain from", "Add Go toolchain")
+	local existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 
 	if [ -n "$existing_issue" ]; then
 		echo -ne " [Closing issue #${existing_issue}... " >&2
@@ -593,7 +636,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 			echo -e "${YELLOW}skipped (fork - cached)${RESET}"
 			# Close any existing issues on forks
 			if [ "$CREATE_ISSUES" = true ]; then
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -613,7 +656,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 			echo "$repo" >>"$FORK_CACHE_UPDATES"
 			# Close any existing issues on forks
 			if [ "$CREATE_ISSUES" = true ]; then
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -631,7 +674,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 			echo -e "${YELLOW}skipped (blocklisted)${RESET}"
 			# Close any existing issues on blocklisted repos
 			if [ "$CREATE_ISSUES" = true ]; then
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on blocklisted repo... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -664,29 +707,43 @@ for ORG_NAME in "${ORGS[@]}"; do
 		ORG_GO_REPOS=$((ORG_GO_REPOS + 1))
 		TOTAL_GO_REPOS=$((TOTAL_GO_REPOS + 1))
 
-		# Extract Go version from go.mod
+		# Extract Go version and toolchain version from go.mod
 		go_version=$(extract_go_version "$go_mod")
+		toolchain_version=$(extract_toolchain_version "$go_mod")
 
 		if [[ -z "$go_version" ]]; then
 			echo -e "${YELLOW}⚠ No Go version specified${RESET}"
 			continue
 		fi
 
-		# Check if version is acceptable (meets OCP baseline or is stable)
-		if is_version_acceptable "$go_version"; then
-			echo -ne "${GREEN}✓ Up-to-date (go${go_version})${RESET}"
+		# Compute effective version (higher of go directive and toolchain directive)
+		effective_version="$go_version"
+		if [ -n "$toolchain_version" ]; then
+			if version_lt "$go_version" "$toolchain_version"; then
+				effective_version="$toolchain_version"
+			fi
+		fi
+
+		# Build display string showing both go and toolchain versions
+		if [ -n "$toolchain_version" ]; then
+			version_display="go${go_version}, toolchain go${toolchain_version}"
+		else
+			version_display="go${go_version}"
+		fi
+
+		# Check if effective version is acceptable (stable on go.dev or >= OCP recommended)
+		if is_version_acceptable "$effective_version"; then
+			echo -ne "${GREEN}✓ Up-to-date (${version_display})${RESET}"
 			# Close any existing tracking issues since repo is now up-to-date
-			close_github_issue "$repo" "go${go_version}"
+			close_github_issue "$repo" "go${effective_version}"
 			echo # New line after potential issue closing message
 		else
-			major_version=$(echo "$go_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 			if [ "$CHECK_MINOR" = true ]; then
-				echo -e "${RED}✗ OUTDATED (go${go_version})${RESET}"
-			elif [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
-				ocp_major=$(echo "$OPENSHIFT_K8S_GO_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-				echo -e "${RED}✗ OUTDATED (go${go_version} - below OCP recommended ${ocp_major})${RESET}"
+				echo -e "${RED}✗ OUTDATED (${version_display})${RESET}"
 			else
-				echo -e "${RED}✗ OUTDATED (go${go_version} - major version ${major_version} is archived)${RESET}"
+				# Extract major version for display
+				major_version=$(echo "$effective_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+				echo -e "${RED}✗ OUTDATED (${version_display} - below OCP recommended ${OPENSHIFT_K8S_GO_VERSION})${RESET}"
 			fi
 			ORG_OUTDATED=$((ORG_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
@@ -695,10 +752,10 @@ for ORG_NAME in "${ORGS[@]}"; do
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
 			# Store for report (global and org-specific with last commit date)
-			# Format: repo|version|branch|tracking_issue_number (tracking_issue_number added later if --create-issues is used)
-			echo "$repo|$go_version|$branch" >>"$OUTDATED_REPOS_FILE"
-			# Format: org|repo|version|branch|last_commit|tracking_issue_number (tracking_issue_number added later if --create-issues is used)
-			echo "$ORG_NAME|$repo|$go_version|$branch|$last_commit|" >>"$ORG_DATA_FILE"
+			# Format: repo|version|branch|toolchain_version
+			echo "$repo|$go_version|$branch|$toolchain_version" >>"$OUTDATED_REPOS_FILE"
+			# Format: org|repo|version|branch|last_commit|tracking_issue_number|toolchain_version
+			echo "$ORG_NAME|$repo|$go_version|$branch|$last_commit||$toolchain_version" >>"$ORG_DATA_FILE"
 		fi
 	done <<<"$REPOS"
 
@@ -742,7 +799,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			echo -e "${YELLOW}skipped (fork - cached)${RESET}"
 			# Close any existing issues on forks
 			if [ "$CREATE_ISSUES" = true ]; then
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -778,7 +835,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			echo "$repo" >>"$FORK_CACHE_UPDATES"
 			# Close any existing issues on forks
 			if [ "$CREATE_ISSUES" = true ]; then
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -796,7 +853,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			echo -e "${YELLOW}skipped (blocklisted)${RESET}"
 			# Close any existing issues on blocklisted repos
 			if [ "$CREATE_ISSUES" = true ]; then
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on blocklisted repo... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -825,29 +882,43 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		INDIVIDUAL_GO_REPOS=$((INDIVIDUAL_GO_REPOS + 1))
 		TOTAL_GO_REPOS=$((TOTAL_GO_REPOS + 1))
 
-		# Extract Go version from go.mod
+		# Extract Go version and toolchain version from go.mod
 		go_version=$(extract_go_version "$go_mod")
+		toolchain_version=$(extract_toolchain_version "$go_mod")
 
 		if [[ -z "$go_version" ]]; then
 			echo -e "${YELLOW}⚠ No Go version specified${RESET}"
 			continue
 		fi
 
-		# Check if version is acceptable (meets OCP baseline or is stable)
-		if is_version_acceptable "$go_version"; then
-			echo -ne "${GREEN}✓ Up-to-date (go${go_version})${RESET}"
+		# Compute effective version (higher of go directive and toolchain directive)
+		effective_version="$go_version"
+		if [ -n "$toolchain_version" ]; then
+			if version_lt "$go_version" "$toolchain_version"; then
+				effective_version="$toolchain_version"
+			fi
+		fi
+
+		# Build display string showing both go and toolchain versions
+		if [ -n "$toolchain_version" ]; then
+			version_display="go${go_version}, toolchain go${toolchain_version}"
+		else
+			version_display="go${go_version}"
+		fi
+
+		# Check if effective version is acceptable (stable on go.dev or >= OCP recommended)
+		if is_version_acceptable "$effective_version"; then
+			echo -ne "${GREEN}✓ Up-to-date (${version_display})${RESET}"
 			# Close any existing tracking issues since repo is now up-to-date
-			close_github_issue "$repo" "go${go_version}"
+			close_github_issue "$repo" "go${effective_version}"
 			echo # New line after potential issue closing message
 		else
-			major_version=$(echo "$go_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 			if [ "$CHECK_MINOR" = true ]; then
-				echo -e "${RED}✗ OUTDATED (go${go_version})${RESET}"
-			elif [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
-				ocp_major=$(echo "$OPENSHIFT_K8S_GO_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-				echo -e "${RED}✗ OUTDATED (go${go_version} - below OCP recommended ${ocp_major})${RESET}"
+				echo -e "${RED}✗ OUTDATED (${version_display})${RESET}"
 			else
-				echo -e "${RED}✗ OUTDATED (go${go_version} - major version ${major_version} is archived)${RESET}"
+				# Extract major version for display
+				major_version=$(echo "$effective_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+				echo -e "${RED}✗ OUTDATED (${version_display} - below OCP recommended ${OPENSHIFT_K8S_GO_VERSION})${RESET}"
 			fi
 			INDIVIDUAL_OUTDATED=$((INDIVIDUAL_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
@@ -857,8 +928,8 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
 
 			# Store for report (global and org-specific with last commit date)
-			echo "$repo|$go_version|$branch" >>"$OUTDATED_REPOS_FILE"
-			echo "Individual Repositories|$repo|$go_version|$branch|$last_commit|" >>"$ORG_DATA_FILE"
+			echo "$repo|$go_version|$branch|$toolchain_version" >>"$OUTDATED_REPOS_FILE"
+			echo "Individual Repositories|$repo|$go_version|$branch|$last_commit||$toolchain_version" >>"$ORG_DATA_FILE"
 		fi
 	done <"$REPO_LIST_FILE"
 
@@ -901,9 +972,13 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 	echo
 
 	# Sort and display
-	sort "$OUTDATED_REPOS_FILE" | while IFS='|' read -r repo version branch; do
+	sort "$OUTDATED_REPOS_FILE" | while IFS='|' read -r repo version branch tc_version; do
 		echo -e "${BOLD}Repository:${RESET} ${repo}"
-		echo -e "  ${RED}Current Version:${RESET} go${version} ${RED}(archived)${RESET}"
+		if [ -n "$tc_version" ]; then
+			echo -e "  ${RED}Current Version:${RESET} go${version}, toolchain go${tc_version} ${RED}(archived)${RESET}"
+		else
+			echo -e "  ${RED}Current Version:${RESET} go${version} ${RED}(archived)${RESET}"
+		fi
 		echo -e "  ${GREEN}Latest Stable:${RESET} go${LATEST_STABLE}"
 		echo -e "  ${BLUE}Branch:${RESET} ${branch}"
 		echo -e "  ${BLUE}URL:${RESET} https://github.com/${repo}"
@@ -920,11 +995,11 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 	ISSUE_MAPPING=$(mktemp)
 
 	# Check each outdated repo for existing issues
-	sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+	sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
 		echo -ne "   📂 Checking ${repo}... " >&2
 
-		# Search for existing "Update Go version" issues (both open and closed)
-		existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state all --json number,title,state --jq ".[] | select(.title | test(\"Update Go version from\")) | \"\(.number)|\(.state)\"" | head -1)
+		# Search for existing Go version/toolchain issues (both open and closed)
+		existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state all --json number,title,state --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | \"\(.number)|\(.state)\"" | head -1)
 
 		if [ -n "$existing_issue" ]; then
 			issue_number=$(echo "$existing_issue" | cut -d'|' -f1)
@@ -939,13 +1014,13 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 	# Update ORG_DATA_FILE with issue numbers
 	if [ -f "$ISSUE_MAPPING" ] && [ -s "$ISSUE_MAPPING" ]; then
 		ORG_DATA_TEMP=$(mktemp)
-		while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+		while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
 			# Look up issue number for this repo
 			issue_num=$(grep "^${repo}|" "$ISSUE_MAPPING" | cut -d'|' -f2)
 			if [ -n "$issue_num" ]; then
-				echo "$org|$repo|$version|$branch|$last_commit|$issue_num" >>"$ORG_DATA_TEMP"
+				echo "$org|$repo|$version|$branch|$last_commit|$issue_num|$tc_version" >>"$ORG_DATA_TEMP"
 			else
-				echo "$org|$repo|$version|$branch|$last_commit|$tracking_issue" >>"$ORG_DATA_TEMP"
+				echo "$org|$repo|$version|$branch|$last_commit|$tracking_issue|$tc_version" >>"$ORG_DATA_TEMP"
 			fi
 		done <"$ORG_DATA_FILE"
 		mv "$ORG_DATA_TEMP" "$ORG_DATA_FILE"
@@ -973,7 +1048,7 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 		ISSUE_MAPPING=$(mktemp)
 
 		# Use ORG_DATA_FILE to access last_commit timestamps
-		sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+		sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
 			# Debug: Show what we're comparing
 			# echo -e "      ${BLUE}[DEBUG] ${repo}: last_commit='${last_commit}' vs ONE_YEAR_AGO='${ONE_YEAR_AGO}'${RESET}" >&2
 
@@ -981,7 +1056,7 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 			if [ -n "$ONE_YEAR_AGO" ] && [ "$last_commit" != "unknown" ] && [ "$last_commit" \< "$ONE_YEAR_AGO" ]; then
 				echo -e "      ${YELLOW}⏩ Skipping ${repo} (last updated: ${last_commit:0:10}, inactive for >1 year)${RESET}" >&2
 				# Close any existing issues on inactive repos
-				existing_issue=$(gh issue list --repo "$repo" --search "Update Go version" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go version from\")) | .number" | head -1)
+				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on inactive repo... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
@@ -993,7 +1068,13 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 				continue
 			fi
 
-			issue_number=$(create_github_issue "$repo" "go${version}" "go${LATEST_STABLE}")
+			# Determine has_toolchain flag for issue creation
+			local has_toolchain="false"
+			if [ -n "$tc_version" ]; then
+				has_toolchain="true"
+			fi
+
+			issue_number=$(create_github_issue "$repo" "go${version}" "go${LATEST_STABLE}" "$has_toolchain")
 			if [ -n "$issue_number" ]; then
 				echo "$repo|$issue_number" >>"$ISSUE_MAPPING"
 			fi
@@ -1002,13 +1083,13 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 		# Update ORG_DATA_FILE with issue numbers
 		if [ -f "$ISSUE_MAPPING" ] && [ -s "$ISSUE_MAPPING" ]; then
 			ORG_DATA_TEMP=$(mktemp)
-			while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+			while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
 				# Look up issue number for this repo
 				issue_num=$(grep "^${repo}|" "$ISSUE_MAPPING" | cut -d'|' -f2)
 				if [ -n "$issue_num" ]; then
-					echo "$org|$repo|$version|$branch|$last_commit|$issue_num" >>"$ORG_DATA_TEMP"
+					echo "$org|$repo|$version|$branch|$last_commit|$issue_num|$tc_version" >>"$ORG_DATA_TEMP"
 				else
-					echo "$org|$repo|$version|$branch|$last_commit|$tracking_issue" >>"$ORG_DATA_TEMP"
+					echo "$org|$repo|$version|$branch|$last_commit|$tracking_issue|$tc_version" >>"$ORG_DATA_TEMP"
 				fi
 			done <"$ORG_DATA_FILE"
 			mv "$ORG_DATA_TEMP" "$ORG_DATA_FILE"
@@ -1074,7 +1155,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 				# Count repos updated in the last year
 				ACTIVE_COUNT=0
 				if [ -n "$ONE_YEAR_AGO" ]; then
-					while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+					while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
 						if [ "$last_commit" != "unknown" ] && [ "$last_commit" \> "$ONE_YEAR_AGO" ]; then
 							ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
 						fi
@@ -1139,13 +1220,17 @@ if [ "$UPDATE_TRACKING" = true ]; then
 				fi
 
 				# Sort by last commit date (most recent first) and add each repo to the table
-				echo "$ORG_REPOS" | sort -t'|' -k5 -r | while IFS='|' read -r org repo version branch last_commit tracking_issue; do
+				echo "$ORG_REPOS" | sort -t'|' -k5 -r | while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
 					# Extract just the repo name (without org prefix)
 					repo_name="${repo##*/}"
 					# Escape pipe characters in repo names if any
 					repo_display=$(echo "$repo_name" | sed 's/|/\\|/g')
 					# Remove 'go' prefix from version if present (go1.25.3 -> 1.25.3)
 					version_display="${version#go}"
+					# Include toolchain version if present
+					if [ -n "$tc_version" ]; then
+						version_display="${version_display} (tc: ${tc_version})"
+					fi
 					# Format the date nicely (from ISO8601 to readable format)
 					if [ "$last_commit" != "unknown" ]; then
 						# Try macOS date format first, then Linux, then fall back to raw
