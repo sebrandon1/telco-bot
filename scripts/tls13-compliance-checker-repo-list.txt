@@ -1,0 +1,13 @@
+# Explicit repository inclusion list for TLS compliance scanning
+# Repos listed here are always included in scans, even if they are forks
+# or would otherwise be missed by org-level scanning.
+#
+# Format: owner/repo
+# Lines starting with # are comments
+
+# Fork repos that GitHub Code Search API cannot index
+openshift/kube-rbac-proxy
+
+# Repos specifically requested for TLS compliance scanning
+openshift-kni/numaresources-operator
+openshift-kni/scheduler-plugins

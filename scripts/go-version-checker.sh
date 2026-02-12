@@ -7,8 +7,9 @@
 # DESCRIPTION:
 #   This script scans GitHub organizations for Go repositories and checks
 #   whether their go.mod files specify an outdated Go version. A version is
-#   considered outdated if it appears in the "Archived versions" section on
-#   https://go.dev/dl/ rather than in the "Stable versions" section.
+#   considered outdated if it is below the Go version used by OpenShift
+#   Kubernetes (openshift/kubernetes go.mod). If the OCP version cannot be
+#   fetched, it falls back to checking the go.dev/dl/ stable versions list.
 #
 # PREREQUISITES:
 #   1. GitHub CLI (gh) must be installed on your system
@@ -297,6 +298,23 @@ is_version_stable() {
 		echo "$STABLE_MAJOR_VERSIONS" | grep -q "go${major_version}"
 		return $?
 	fi
+}
+
+# Function to check if a version is acceptable (meets OCP baseline or is stable)
+# Uses OCP recommended version as baseline when available, falls back to is_version_stable
+is_version_acceptable() {
+	local version=$1
+	version=$(echo "$version" | sed 's/^go//')
+	if [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+		local repo_major=$(echo "$version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+		local ocp_major=$(echo "$OPENSHIFT_K8S_GO_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+		if version_lt "$repo_major" "$ocp_major"; then
+			return 1 # below OCP → outdated
+		else
+			return 0 # at or above OCP → acceptable
+		fi
+	fi
+	is_version_stable "$version"
 }
 
 # Function to extract Go version from go.mod content
@@ -654,18 +672,20 @@ for ORG_NAME in "${ORGS[@]}"; do
 			continue
 		fi
 
-		# Check if version is stable
-		if is_version_stable "$go_version"; then
+		# Check if version is acceptable (meets OCP baseline or is stable)
+		if is_version_acceptable "$go_version"; then
 			echo -ne "${GREEN}✓ Up-to-date (go${go_version})${RESET}"
 			# Close any existing tracking issues since repo is now up-to-date
 			close_github_issue "$repo" "go${go_version}"
 			echo # New line after potential issue closing message
 		else
+			major_version=$(echo "$go_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 			if [ "$CHECK_MINOR" = true ]; then
 				echo -e "${RED}✗ OUTDATED (go${go_version})${RESET}"
+			elif [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+				ocp_major=$(echo "$OPENSHIFT_K8S_GO_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+				echo -e "${RED}✗ OUTDATED (go${go_version} - below OCP recommended ${ocp_major})${RESET}"
 			else
-				# Extract major version for display
-				major_version=$(echo "$go_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 				echo -e "${RED}✗ OUTDATED (go${go_version} - major version ${major_version} is archived)${RESET}"
 			fi
 			ORG_OUTDATED=$((ORG_OUTDATED + 1))
@@ -813,18 +833,20 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			continue
 		fi
 
-		# Check if version is stable
-		if is_version_stable "$go_version"; then
+		# Check if version is acceptable (meets OCP baseline or is stable)
+		if is_version_acceptable "$go_version"; then
 			echo -ne "${GREEN}✓ Up-to-date (go${go_version})${RESET}"
 			# Close any existing tracking issues since repo is now up-to-date
 			close_github_issue "$repo" "go${go_version}"
 			echo # New line after potential issue closing message
 		else
+			major_version=$(echo "$go_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 			if [ "$CHECK_MINOR" = true ]; then
 				echo -e "${RED}✗ OUTDATED (go${go_version})${RESET}"
+			elif [ "$OPENSHIFT_K8S_GO_VERSION" != "unknown" ]; then
+				ocp_major=$(echo "$OPENSHIFT_K8S_GO_VERSION" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+				echo -e "${RED}✗ OUTDATED (go${go_version} - below OCP recommended ${ocp_major})${RESET}"
 			else
-				# Extract major version for display
-				major_version=$(echo "$go_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
 				echo -e "${RED}✗ OUTDATED (go${go_version} - major version ${major_version} is archived)${RESET}"
 			fi
 			INDIVIDUAL_OUTDATED=$((INDIVIDUAL_OUTDATED + 1))
@@ -1162,7 +1184,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 ## What to Do
 
-Repositories listed above are using Go versions that are in the archived section of [go.dev/dl/](https://go.dev/dl/). Consider updating to the latest stable version (\`${LATEST_STABLE}\`).
+Repositories listed above are using Go versions below the OCP recommended version (\`${OPENSHIFT_K8S_GO_VERSION}\`), based on [openshift/kubernetes go.mod](https://github.com/openshift/kubernetes/blob/master/go.mod). Consider updating to at least the OCP version, or to the latest stable version (\`${LATEST_STABLE}\`).
 
 "
 	else
