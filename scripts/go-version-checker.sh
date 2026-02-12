@@ -1069,7 +1069,7 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 			fi
 
 			# Determine has_toolchain flag for issue creation
-			local has_toolchain="false"
+			has_toolchain="false"
 			if [ -n "$tc_version" ]; then
 				has_toolchain="true"
 			fi
