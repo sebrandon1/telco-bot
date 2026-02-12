@@ -295,6 +295,7 @@ red-hat-storage/rook
 red-hat-storage/snapscheduler
 red-hat-storage/volume-replication-operator
 redhat-best-practices-for-k8s/k8s-far-edge-best-practices-guide
+redhat-best-practices-for-k8s/vz-cnf-far-edge-best-practices-guide
 redhat-openshift-ecosystem/crossIndexUpdateTool
 redhat-openshift-ecosystem/operator-pipelines-1
 redhat-openshift-ecosystem/operator-pipelines-2
