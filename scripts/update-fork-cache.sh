@@ -87,7 +87,7 @@ RESET="\033[0m"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Configuration
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift")
+ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
 CACHE_DIR="$SCRIPT_DIR/caches"
 CACHE_FILE="$CACHE_DIR/forks.txt"
 LIMIT=1000

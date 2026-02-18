@@ -89,7 +89,7 @@ echo -e "\033[0;32m✅ GitHub CLI authenticated successfully\033[0m"
 echo
 
 # List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci")
+ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
 
 LIMIT=1000
 FOUND_COUNT=0

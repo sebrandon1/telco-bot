@@ -133,7 +133,7 @@ done
 # Restricted to single org for testing after rebase
 # ORGS=("redhatci", "redhat-best-practices-for-k8s")
 # Full list for production:
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift")
+ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
 
 LIMIT=1000
 OUTDATED_COUNT=0

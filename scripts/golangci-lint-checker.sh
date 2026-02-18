@@ -143,7 +143,7 @@ for arg in "$@"; do
 done
 
 # List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift")
+ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
 
 LIMIT=1000
 OUTDATED_COUNT=0

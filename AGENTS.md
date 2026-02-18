@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-Telco-Bot is an automation toolset for the Red Hat Telco team. It provides GitHub repository scanning, dependency tracking, and Slack/Jira integrations across multiple Red Hat organizations (`redhat-best-practices-for-k8s`, `openshift`, `openshift-kni`, `redhat-openshift-ecosystem`, `redhatci`).
+Telco-Bot is an automation toolset for the Red Hat Telco team. It provides GitHub repository scanning, dependency tracking, and Slack/Jira integrations across multiple Red Hat organizations (`redhat-best-practices-for-k8s`, `openshift`, `openshift-kni`, `redhat-openshift-ecosystem`, `redhatci`, `openshift-eng`, `crc-org`).
 
 The codebase is primarily shell scripts with a minimal Go-based Slack bot framework.
 

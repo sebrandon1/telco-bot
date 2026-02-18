@@ -76,6 +76,8 @@ show_help() {
 	echo "                          - openshift-kni"
 	echo "                          - redhat-openshift-ecosystem"
 	echo "                          - redhatci"
+	echo "                          - openshift-eng"
+	echo "                          - crc-org"
 	echo
 	echo "    -h, --help            Show this help message"
 	echo
@@ -158,7 +160,7 @@ if [[ -n "$SPECIFIC_ORG" ]]; then
 	echo -e "\033[0;36mℹ️  Scanning specific organization: ${SPECIFIC_ORG}\033[0m"
 	echo
 else
-	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci")
+	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
 	echo -e "\033[0;36mℹ️  Scanning all default organizations\033[0m"
 	echo
 fi

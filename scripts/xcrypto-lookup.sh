@@ -95,7 +95,7 @@ show_help() {
 	echo -e "${BOLD}CONFIGURATION:${RESET}"
 	echo "    Organizations scanned:"
 	echo "        redhat-best-practices-for-k8s, openshift, openshift-kni,"
-	echo "        redhat-openshift-ecosystem, redhatci"
+	echo "        redhat-openshift-ecosystem, redhatci, openshift-eng, crc-org"
 	echo
 	echo "    Individual repositories can be added to xcrypto-repo-list.txt"
 	echo "    (one per line, supports: owner/repo, github.com/owner/repo, or full URL)"
@@ -227,7 +227,7 @@ fi
 echo
 
 # List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci")
+ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
 # ORGS=("openshift-kni")
 
 LIMIT=1000

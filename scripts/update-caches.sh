@@ -108,7 +108,7 @@ BOLD="\033[1m"
 RESET="\033[0m"
 
 # Configuration
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift")
+ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
 LIMIT=1000
 
 # Ensure cache directory exists

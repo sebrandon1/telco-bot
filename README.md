@@ -26,6 +26,8 @@ Telco-Bot is a collection of automation tools and scripts designed to help the R
 - `openshift-kni`
 - `redhat-openshift-ecosystem`
 - `redhatci`
+- `openshift-eng`
+- `crc-org`
 
 ## Quick Start
 

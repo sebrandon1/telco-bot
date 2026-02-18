@@ -149,7 +149,7 @@ show_help() {
 	echo -e "${BOLD}CONFIGURATION:${RESET}"
 	echo "    Organizations scanned:"
 	echo "        redhat-best-practices-for-k8s, openshift, openshift-kni,"
-	echo "        redhat-openshift-ecosystem, redhatci"
+	echo "        redhat-openshift-ecosystem, redhatci, openshift-eng, crc-org"
 	echo
 	echo "    Repositories can be excluded by adding them to:"
 	echo "        scripts/tls13-repo-blocklist.txt"
@@ -271,7 +271,7 @@ echo
 
 # List of orgs to scan (can be overridden by environment variable)
 if [ -z "${ORGS+x}" ]; then
-	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "red-hat-storage")
+	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org" "red-hat-storage")
 fi
 
 LIMIT=1000
