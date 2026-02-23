@@ -6,8 +6,7 @@ on:
     - cron: '0 5 * * *'
   workflow_dispatch:  # Allow manual trigger
 
-permissions:
-  contents: read
+permissions: read-all
 
 jobs:
   update-caches:

@@ -5,7 +5,7 @@ on:
     # Run daily at 7:30 AM UTC (2:30 AM EST / 3:30 AM EDT)
     - cron: '30 7 * * *'
   workflow_dispatch:  # Allow manual trigger
-
+permissions: read-all
 jobs:
   check-ioutil-usage:
     runs-on: ubuntu-latest
