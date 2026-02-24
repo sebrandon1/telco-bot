@@ -7,7 +7,7 @@ on:
   #   branches:
   #     - main
   workflow_dispatch:
-
+permissions: read-all
 jobs:
   weekly-query:
     runs-on: ubuntu-latest

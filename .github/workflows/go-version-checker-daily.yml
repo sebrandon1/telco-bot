@@ -5,7 +5,7 @@ on:
     # Run daily at 6:00 AM UTC (1:00 AM EST / 2:00 AM EDT)
     - cron: '0 6 * * *'
   workflow_dispatch:  # Allow manual trigger
-
+permissions: read-all
 jobs:
   check-go-versions:
     runs-on: ubuntu-latest

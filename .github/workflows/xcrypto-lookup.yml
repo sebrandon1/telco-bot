@@ -5,7 +5,7 @@ on:
     # Run daily at 6:00 AM UTC (after cache updates at 5:00 AM)
     - cron: '0 6 * * *'
   workflow_dispatch:
-
+permissions: read-all
 jobs:
   xcrypto-lookup:
     runs-on: ubuntu-latest
