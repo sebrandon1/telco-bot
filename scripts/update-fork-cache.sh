@@ -29,34 +29,21 @@
 #
 #===============================================================================
 
+# Get script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+
 # Check for help flag first
 for arg in "$@"; do
 	if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
-		awk '/^#=====/ { if (++count == 3) exit; next } count == 2 && /^#/ { sub(/^# ?/, ""); print }' "$0"
+		show_help_from_header "$0"
 		exit 0
 	fi
 done
 
-# Check if GitHub CLI is installed
-if ! command -v gh &>/dev/null; then
-	echo "❌ ERROR: GitHub CLI (gh) is not installed!" >&2
-	echo "💡 Please install it first: https://cli.github.com/" >&2
-	exit 1
-fi
-
-# Check if GitHub CLI is logged in
-if ! gh auth status &>/dev/null; then
-	echo "❌ ERROR: GitHub CLI is not logged in!" >&2
-	echo "💡 Please run 'gh auth login' to authenticate first." >&2
-	exit 1
-fi
-
-# Check if jq is installed
-if ! command -v jq &>/dev/null; then
-	echo "❌ ERROR: jq is not installed!" >&2
-	echo "💡 Please install jq for JSON processing." >&2
-	exit 1
-fi
+# Prerequisites
+require_tool gh jq
+check_gh_auth
 
 # Parse command line arguments
 CLOSE_ISSUES=false
@@ -75,33 +62,19 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # Configuration
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
-CACHE_DIR="$SCRIPT_DIR/caches"
-CACHE_FILE="$CACHE_DIR/forks.txt"
-LIMIT=1000
-
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
+ORGS=("${DEFAULT_ORGS[@]}")
+LIMIT=$DEFAULT_LIMIT
+init_cache_paths
 
 echo -e "${BLUE}${BOLD}🔍 FINDING FORK REPOSITORIES${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 echo
 
-# Temporary files
+# Temporary files with trap-based cleanup
 FORK_REPOS=$(mktemp)
 CLOSED_ISSUES=$(mktemp)
+trap 'rm -f "$FORK_REPOS" "$CLOSED_ISSUES"' EXIT
 
 TOTAL_REPOS=0
 FORK_COUNT=0
@@ -178,8 +151,8 @@ echo
 
 # Save to cache
 if [ -f "$FORK_REPOS" ] && [ -s "$FORK_REPOS" ]; then
-	sort -u "$FORK_REPOS" >"$CACHE_FILE"
-	echo -e "${GREEN}${BOLD}✅ Cache updated: ${CACHE_FILE}${RESET}"
+	sort -u "$FORK_REPOS" >"$FORK_CACHE"
+	echo -e "${GREEN}${BOLD}✅ Cache updated: ${FORK_CACHE}${RESET}"
 	echo -e "${BLUE}   ${FORK_COUNT} fork repositories cached${RESET}"
 
 	if [ "$CLOSE_ISSUES" = true ] && [ -f "$CLOSED_ISSUES" ] && [ -s "$CLOSED_ISSUES" ]; then
@@ -192,11 +165,8 @@ if [ -f "$FORK_REPOS" ] && [ -s "$FORK_REPOS" ]; then
 else
 	echo -e "${GREEN}${BOLD}✅ No fork repositories found${RESET}"
 	# Create empty cache file
-	touch "$CACHE_FILE"
+	touch "$FORK_CACHE"
 fi
-
-# Cleanup
-rm -f "$FORK_REPOS" "$CLOSED_ISSUES"
 
 echo
 echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"

@@ -46,4 +46,5 @@ MESSAGE+="$REPO_NAME_LEGACY: $NUMBER_OF_PULL_REPO_JOBS_LEGACY\n"
 MESSAGE+="$REPO_NAME_CURRENT: $NUMBER_OF_PULL_REPO_JOBS_CURRENT"
 
 # Send the message to Slack
-curl -X POST -H 'Content-type: application/json' --data "{\"message\":\"$MESSAGE\"}" "$SLACK_WEBHOOK_URL"
+DATA=$(jq -n --arg message "$MESSAGE" '{message: $message}')
+curl -X POST -H 'Content-type: application/json' --data "$DATA" "$SLACK_WEBHOOK_URL"

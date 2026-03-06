@@ -52,9 +52,8 @@
 #   - Requires public access to container files or appropriate permissions
 #===============================================================================
 
-# Terminal colors (defined early for help text)
-BOLD="\033[1m"
-RESET="\033[0m"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
 # Function to show help
 show_help() {
@@ -115,8 +114,8 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	*)
-		echo -e "\033[0;31m❌ ERROR: Unknown option: $1\033[0m"
-		echo -e "\033[0;33m💡 Use -h or --help for usage information\033[0m"
+		echo -e "${RED}❌ ERROR: Unknown option: $1${RESET}"
+		echo -e "${YELLOW}💡 Use -h or --help for usage information${RESET}"
 		exit 1
 		;;
 	esac
@@ -124,31 +123,14 @@ done
 
 # Validate that UBI version was provided
 if [[ -z "$UBI_VERSION" ]]; then
-	echo -e "\033[0;31m❌ ERROR: UBI version is required!\033[0m"
-	echo -e "\033[0;33m💡 Use -h or --help for usage information\033[0m"
+	echo -e "${RED}❌ ERROR: UBI version is required!${RESET}"
+	echo -e "${YELLOW}💡 Use -h or --help for usage information${RESET}"
 	exit 1
 fi
 
-# Check if GitHub CLI is installed
-echo "🔧 Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI (gh) is not installed!\033[0m"
-	echo -e "\033[0;33m💡 Please install it first:\033[0m"
-	echo -e "\033[0;33m   macOS: brew install gh\033[0m"
-	echo -e "\033[0;33m   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md\033[0m"
-	echo -e "\033[0;33m   Or visit: https://cli.github.com/\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI is installed\033[0m"
-
-# Check if GitHub CLI is logged in
-echo "🔒 Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI is not logged in!\033[0m"
-	echo -e "\033[0;33m💡 Please run 'gh auth login' to authenticate first.\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI authenticated successfully\033[0m"
+# Check prerequisites
+require_tool gh curl
+check_gh_auth
 echo
 
 # Start timing
@@ -157,31 +139,29 @@ START_TIME=$(date +%s)
 # List of orgs to scan
 if [[ -n "$SPECIFIC_ORG" ]]; then
 	ORGS=("$SPECIFIC_ORG")
-	echo -e "\033[0;36mℹ️  Scanning specific organization: ${SPECIFIC_ORG}\033[0m"
+	echo -e "${BLUE}ℹ️  Scanning specific organization: ${SPECIFIC_ORG}${RESET}"
 	echo
 else
-	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
-	echo -e "\033[0;36mℹ️  Scanning all default organizations\033[0m"
+	ORGS=("${DEFAULT_ORGS[@]}")
+	echo -e "${BLUE}ℹ️  Scanning all default organizations${RESET}"
 	echo
 fi
 
-LIMIT=1000
+LIMIT=$DEFAULT_LIMIT
 FOUND_COUNT=0
 TOTAL_REPOS=0
-
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
 
 # Common Dockerfile/Containerfile paths to check
 CONTAINER_FILES=("Dockerfile" "Containerfile" "build/Dockerfile" "docker/Dockerfile" ".dockerfiles/Dockerfile" "dockerfiles/Dockerfile")
 
 # Track other UBI versions found (using temp file for bash 3.x compatibility)
 UBI_VERSIONS_TEMP=$(mktemp)
+
+# Cleanup temp files on exit
+cleanup() {
+	rm -f "$UBI_VERSIONS_TEMP"
+}
+trap cleanup EXIT
 
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR ${UBI_VERSION} IMAGE USAGE${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
@@ -325,7 +305,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 done
 
 # Scan individual repositories from ubi-repo-list.txt if it exists
-REPO_LIST_FILE="ubi-repo-list.txt"
+REPO_LIST_FILE="${SCRIPT_DIR}/ubi-repo-list.txt"
 if [ -f "$REPO_LIST_FILE" ]; then
 	echo -e "${YELLOW}${BOLD}👉 Individual Repositories from ${REPO_LIST_FILE}${RESET}"
 
@@ -336,26 +316,12 @@ if [ -f "$REPO_LIST_FILE" ]; then
 	# Use a separate file to store results
 	temp_results=$(mktemp)
 
-	# First pass: count valid repos
-	TOTAL_INDIVIDUAL=0
-	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
-		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
-		[[ -z "$repo" ]] && continue
-		TOTAL_INDIVIDUAL=$((TOTAL_INDIVIDUAL + 1))
-	done <"$REPO_LIST_FILE"
+	# Read and normalize repo list
+	mapfile -t INDIVIDUAL_REPOS < <(read_repo_list "$REPO_LIST_FILE")
+	TOTAL_INDIVIDUAL=${#INDIVIDUAL_REPOS[@]}
 
-	# Second pass: actually scan the repos
-	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
-		# Skip empty lines and comments (# or //)
-		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
-
-		# Normalize repo format: extract owner/repo from various formats
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
-
-		# Skip if still empty after normalization
-		[[ -z "$repo" ]] && continue
-
+	# Scan the repos
+	for repo in "${INDIVIDUAL_REPOS[@]}"; do
 		INDIVIDUAL_COUNT=$((INDIVIDUAL_COUNT + 1))
 
 		# Get default branch for the repo
@@ -405,7 +371,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 				echo -e "${RED}✗ NO ${UBI_VERSION} usage found${RESET}"
 			fi
 		fi
-	done <"$REPO_LIST_FILE"
+	done
 
 	# Count the results
 	if [ -f "$temp_results" ]; then
@@ -448,9 +414,6 @@ if [ -f "$UBI_VERSIONS_TEMP" ] && [ -s "$UBI_VERSIONS_TEMP" ]; then
 		fi
 	done
 fi
-
-# Clean up temp file
-[ -f "$UBI_VERSIONS_TEMP" ] && rm -f "$UBI_VERSIONS_TEMP"
 
 # Calculate and display elapsed time
 END_TIME=$(date +%s)
