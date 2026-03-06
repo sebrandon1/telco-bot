@@ -135,16 +135,9 @@ echo -e "${YELLOW}${BOLD}📋 IDENTIFIED DOWNSTREAM REPOSITORIES${RESET}" >&2
 echo -e "${YELLOW}─────────────────────────────────────────────────────${RESET}" >&2
 echo >&2
 
-# Arrays to store different categories
-FORK_REPOS=()
-SUSPECTED_DOWNSTREAM=()
-
 # Process each repository
 echo "$REPOS" | jq -c '.' | while IFS= read -r repo_json; do
-	repo_name=$(echo "$repo_json" | jq -r '.nameWithOwner')
-	is_fork=$(echo "$repo_json" | jq -r '.isFork')
-	parent=$(echo "$repo_json" | jq -r '.parent.nameWithOwner // empty')
-	description=$(echo "$repo_json" | jq -r '.description // ""')
+	read -r repo_name is_fork parent description < <(echo "$repo_json" | jq -r '[.nameWithOwner, (.isFork | tostring), (.parent.nameWithOwner // ""), (.description // "")] | @tsv')
 
 	repo_basename=$(basename "$repo_name")
 

@@ -104,88 +104,9 @@
 #     language-specific test files
 #===============================================================================
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
-#===============================================================================
-# HELP MENU
-#===============================================================================
-
-show_help() {
-	echo -e "${BOLD}TLS 1.3 COMPLIANCE CHECKER (Multi-Language)${RESET}"
-	echo
-	echo -e "${BOLD}USAGE:${RESET}"
-	echo "    $(basename "$0") [OPTIONS]"
-	echo
-	echo -e "${BOLD}DESCRIPTION:${RESET}"
-	echo "    Scans GitHub organizations for repositories with TLS configuration"
-	echo "    issues and anti-patterns across Go, Python, Node.js, and C++."
-	echo "    Identifies certificate verification bypass, weak TLS versions,"
-	echo "    and deprecated options."
-	echo
-	echo -e "${BOLD}OPTIONS:${RESET}"
-	echo "    -h, --help          Show this help message and exit"
-	echo "    -f, --force         Force refresh cache (ignore cache age)"
-	echo "    --no-tracking       Skip updating the central tracking issue"
-	echo "    --mode <api|clone>  Scanning mode (default: clone)"
-	echo "                        - clone: Clone repos locally, scan with grep"
-	echo "                        - api: Use GitHub Code Search (for CI/CD)"
-	echo
-	echo -e "${BOLD}PASS/FAIL MODEL:${RESET}"
-	echo "    All findings are FAIL. Repos with no findings are PASS."
-	echo "    Detects: cert verification bypass, weak TLS versions, hardcoded config"
-	echo
-	echo -e "${BOLD}PREREQUISITES:${RESET}"
-	echo "    - GitHub CLI (gh) must be installed and authenticated"
-	echo "      Install: brew install gh (macOS) or https://cli.github.com/"
-	echo "      Auth: gh auth login"
-	echo "    - git must be available (clone mode only)"
-	echo
-	echo -e "${BOLD}CONFIGURATION:${RESET}"
-	echo "    Organizations scanned:"
-	echo "        redhat-best-practices-for-k8s, openshift, openshift-kni,"
-	echo "        redhat-openshift-ecosystem, redhatci, openshift-eng, crc-org"
-	echo
-	echo "    Repositories can be excluded by adding them to:"
-	echo "        scripts/tls13-repo-blocklist.txt"
-	echo
-	echo -e "${BOLD}OUTPUT:${RESET}"
-	echo "    - Real-time progress and per-organization summaries"
-	echo "    - Findings categorized by severity level"
-	echo "    - Markdown report: tls13-compliance-report.md"
-	echo "    - Auto-updates tracking issue in telco-bot repo"
-	echo
-	echo -e "${BOLD}CACHES:${RESET}"
-	echo "    Uses shared caches to skip known abandoned repos."
-	echo "    Caches are stored in:"
-	echo "        scripts/caches/"
-	echo
-	echo -e "${BOLD}LOCAL REPOS (clone mode only):${RESET}"
-	echo "    Repositories are cloned to:"
-	echo "        ~/Repositories/go/src/github.com/<org>/<repo>"
-	echo "    Existing clones are updated with git fetch/pull."
-	echo "    Clones persist between runs for faster subsequent scans."
-	echo
-	echo -e "${BOLD}EXAMPLES:${RESET}"
-	echo "    # Run with clone mode (default, fastest for local use)"
-	echo "    ./$(basename "$0")"
-	echo
-	echo "    # Run with API mode (for GitHub Actions, no cloning)"
-	echo "    ./$(basename "$0") --mode api"
-	echo
-	echo "    # Force refresh, ignoring cache"
-	echo "    ./$(basename "$0") --force"
-	echo
-	echo "    # Scan without updating tracking issue"
-	echo "    ./$(basename "$0") --no-tracking"
-	echo
-	exit 0
-}
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
 # Feature flags
 FORCE_REFRESH=false
@@ -196,7 +117,8 @@ SCAN_MODE="clone" # "clone" or "api"
 while [[ $# -gt 0 ]]; do
 	case $1 in
 	-h | --help)
-		show_help
+		show_help_from_header "$0"
+		exit 0
 		;;
 	-f | --force)
 		FORCE_REFRESH=true
@@ -225,48 +147,12 @@ while [[ $# -gt 0 ]]; do
 	shift
 done
 
-# Check if GitHub CLI is installed
-echo "Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "${RED}ERROR: GitHub CLI (gh) is not installed!${RESET}"
-	echo -e "${YELLOW}Please install it first:${RESET}"
-	echo -e "${YELLOW}   macOS: brew install gh${RESET}"
-	echo -e "${YELLOW}   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md${RESET}"
-	echo -e "${YELLOW}   Or visit: https://cli.github.com/${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}GitHub CLI is installed${RESET}"
-
-# Check if GitHub CLI is logged in
-echo "Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "${RED}ERROR: GitHub CLI is not logged in!${RESET}"
-	echo -e "${YELLOW}Please run 'gh auth login' to authenticate first.${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}GitHub CLI authenticated successfully${RESET}"
-
-# Check if git is installed (only needed for clone mode)
+# Check prerequisites
+require_tool gh jq
+check_gh_auth
 if [ "$SCAN_MODE" = "clone" ]; then
-	echo "Checking git installation..."
-	if ! command -v git &>/dev/null; then
-		echo -e "${RED}ERROR: git is not installed!${RESET}"
-		echo -e "${YELLOW}Please install git first${RESET}"
-		exit 1
-	fi
-	echo -e "${GREEN}git is installed${RESET}"
+	require_tool git
 fi
-
-# Check if jq is installed
-echo "Checking jq installation..."
-if ! command -v jq &>/dev/null; then
-	echo -e "${RED}ERROR: jq is not installed!${RESET}"
-	echo -e "${YELLOW}Please install it first:${RESET}"
-	echo -e "${YELLOW}   macOS: brew install jq${RESET}"
-	echo -e "${YELLOW}   Linux: apt-get install jq${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}jq is installed${RESET}"
 echo
 
 # List of orgs to scan (can be overridden by environment variable)
@@ -274,7 +160,7 @@ if [ -z "${ORGS+x}" ]; then
 	ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org" "red-hat-storage")
 fi
 
-LIMIT=1000
+LIMIT=$DEFAULT_LIMIT
 TOTAL_REPOS=0
 SKIPPED_ABANDONED=0
 SKIPPED_BLOCKLIST=0
@@ -283,12 +169,9 @@ CLONE_FAILURES=0
 # Finding counters
 TOTAL_FINDINGS=0
 
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Initialize shared cache paths (sets CACHE_DIR, FORK_CACHE, ABANDONED_CACHE, NOGOMOD_CACHE)
+init_cache_paths
 
-# Shared cache files (used by all lookup scripts)
-CACHE_DIR="$SCRIPT_DIR/caches"
-ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
 BLOCKLIST_FILE="$SCRIPT_DIR/tls13-repo-blocklist.txt"
 REPO_LIST_FILE="$SCRIPT_DIR/tls13-compliance-checker-repo-list.txt"
 OUTPUT_MD="tls13-compliance-report.md"
@@ -299,23 +182,17 @@ RESULTS_CACHE=".tls13-checker-results.json"
 # Local repos directory (persistent)
 LOCAL_REPOS_DIR="$HOME/Repositories/go/src/github.com"
 
-# Ensure directories exist
-mkdir -p "$CACHE_DIR"
 if [ "$SCAN_MODE" = "clone" ]; then
 	mkdir -p "$LOCAL_REPOS_DIR"
 fi
 
-# Inactivity threshold (in days)
-INACTIVITY_DAYS=180 # 6 months
+# Set cutoff date for abandoned repo detection (used by is_repo_abandoned from common.sh)
+CUTOFF_DATE=$(calculate_cutoff_date "$DEFAULT_INACTIVITY_DAYS")
 
 # Cache age threshold (in seconds) - 6 hours
 CACHE_MAX_AGE=$((6 * 60 * 60))
 
-# Create empty cache files if they don't exist
-touch "$ABANDONED_CACHE"
-
-# Tracking issue configuration
-TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
+# Tracking issue configuration (TRACKING_REPO comes from common.sh)
 TRACKING_ISSUE_TITLE="Tracking TLS Configuration Compliance"
 
 # Supported languages for scanning
@@ -409,13 +286,6 @@ build_extra_exclude_dirs() {
 # HELPER FUNCTIONS
 #===============================================================================
 
-# Helper function to check if repo is in cache
-is_in_cache() {
-	local repo="$1"
-	local cache_file="$2"
-	grep -Fxq "$repo" "$cache_file" 2>/dev/null
-}
-
 # Helper function to check if repo is in blocklist
 is_blocklisted() {
 	local repo="$1"
@@ -424,13 +294,13 @@ is_blocklisted() {
 		return 1
 	fi
 
-	# Normalize and check against blocklist
+	# Normalize and check against blocklist (normalize_repo from common.sh)
 	while IFS= read -r line || [ -n "$line" ]; do
 		# Skip empty lines and comments
 		[[ -z "$line" || "$line" =~ ^[[:space:]]*(#|//) ]] && continue
 
-		# Normalize the line (remove github.com prefix, https, etc.)
-		local normalized=$(echo "$line" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		local normalized
+		normalized=$(normalize_repo "$line")
 
 		if [ "$normalized" = "$repo" ]; then
 			return 0
@@ -467,33 +337,6 @@ is_cache_valid() {
 	local age=$((now_epoch - cache_epoch))
 
 	if [ $age -lt $CACHE_MAX_AGE ]; then
-		return 0
-	else
-		return 1
-	fi
-}
-
-# Helper function to check if repo is abandoned (no commits in last 6 months)
-is_repo_abandoned() {
-	local repo="$1"
-	local branch="$2"
-
-	# Calculate cutoff date
-	local cutoff_date=$(date -u -v-${INACTIVITY_DAYS}d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${INACTIVITY_DAYS} days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
-
-	if [ -z "$cutoff_date" ]; then
-		return 1
-	fi
-
-	# Fetch last commit date from default branch
-	local last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null)
-
-	if [[ $? -ne 0 || -z "$last_commit" ]]; then
-		return 1
-	fi
-
-	# Compare dates
-	if [ "$last_commit" \< "$cutoff_date" ]; then
 		return 0
 	else
 		return 1
@@ -1041,11 +884,10 @@ else
 fi
 echo
 
-# Temporary file to store org-specific data for tracking issue
+# Temporary files for org-specific data and statistics
 ORG_DATA_FILE=$(mktemp)
-
-# Temporary file to track per-org statistics (bash 3.x compatible)
 ORG_STATS_FILE=$(mktemp)
+trap 'rm -f "$ORG_DATA_FILE" "$ORG_STATS_FILE"' EXIT
 
 # Repos with findings (FAIL) vs without (PASS)
 FAIL_REPOS=0
@@ -1200,8 +1042,8 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		# Skip empty lines and comments
 		[[ -z "$line" || "$line" =~ ^[[:space:]]*(#|//) ]] && continue
 
-		# Normalize the repo name
-		repo=$(echo "$line" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		# Normalize the repo name (normalize_repo from common.sh)
+		repo=$(normalize_repo "$line")
 		[ -z "$repo" ] && continue
 
 		# Check if this repo was already scanned in the org loop
@@ -1284,9 +1126,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 fi
 
 # Sort and deduplicate caches
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	sort -u "$ABANDONED_CACHE" -o "$ABANDONED_CACHE"
-fi
+dedup_cache "$ABANDONED_CACHE"
 
 # Calculate totals
 TOTAL_ISSUES=$TOTAL_FINDINGS
@@ -1588,8 +1428,5 @@ fi
 
 # Update cache timestamp
 update_cache_timestamp
-
-# Cleanup temporary files
-rm -f "$ORG_DATA_FILE" "$ORG_STATS_FILE"
 
 echo -e "${GREEN}${BOLD}Scan completed successfully!${RESET}"

@@ -14,7 +14,7 @@ dependencies_check() {
 
 # Function to decode base64 and extract JSON fields
 _jq() {
-	echo ${1} | base64 --decode | jq -r ${2}
+	echo "${1}" | base64 --decode | jq -r "${2}"
 }
 
 # Validate arguments
@@ -78,7 +78,7 @@ done
 
 echo "$MESSAGE"
 
-DATA="{\"message\"   : \"${MESSAGE}\"}"
+DATA=$(jq -n --arg message "$MESSAGE" '{message: $message}')
 
 # Send the message to Slack
-curl -X POST -H 'Content-type: application/json charset=UTF-8' --data "$DATA" "$SLACK_WEBHOOK_URL"
+curl -X POST -H 'Content-type: application/json; charset=UTF-8' --data "$DATA" "$SLACK_WEBHOOK_URL"

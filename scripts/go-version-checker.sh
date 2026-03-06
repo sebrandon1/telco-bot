@@ -68,34 +68,21 @@
 #   - Version comparison is based on the go.dev/dl/ page structure
 #===============================================================================
 
+# Set SCRIPT_DIR before sourcing common.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+
 # Check for help flag first (before any other checks)
 for arg in "$@"; do
 	if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
-		awk '/^#=====/ { if (++count == 3) exit; next } count == 2 && /^#/ { sub(/^# ?/, ""); print }' "$0"
+		show_help_from_header "$0"
 		exit 0
 	fi
 done
 
-# Check if GitHub CLI is installed
-echo "🔧 Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI (gh) is not installed!\033[0m"
-	echo -e "\033[0;33m💡 Please install it first:\033[0m"
-	echo -e "\033[0;33m   macOS: brew install gh\033[0m"
-	echo -e "\033[0;33m   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md\033[0m"
-	echo -e "\033[0;33m   Or visit: https://cli.github.com/\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI is installed\033[0m"
-
-# Check if GitHub CLI is logged in
-echo "🔒 Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI is not logged in!\033[0m"
-	echo -e "\033[0;33m💡 Please run 'gh auth login' to authenticate first.\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI authenticated successfully\033[0m"
+# Prerequisites
+require_tool gh curl
+check_gh_auth
 echo
 
 # Parse command line arguments
@@ -122,92 +109,57 @@ for arg in "$@"; do
 		shift
 		;;
 	*)
-		echo -e "\033[0;31m❌ ERROR: Unknown option: $arg\033[0m"
+		echo -e "${RED}ERROR: Unknown option: $arg${RESET}"
 		echo "Use --help or -h for usage information"
 		exit 1
 		;;
 	esac
 done
 
-# List of orgs to scan
-# Restricted to single org for testing after rebase
-# ORGS=("redhatci", "redhat-best-practices-for-k8s")
-# Full list for production:
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
+# Use shared defaults
+ORGS=("${DEFAULT_ORGS[@]}")
+LIMIT="$DEFAULT_LIMIT"
+INACTIVITY_DAYS=180
 
-LIMIT=1000
 OUTDATED_COUNT=0
 TOTAL_GO_REPOS=0
 TOTAL_REPOS=0
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
-# Tracking issue configuration
-TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
+# Tracking issue title (script-specific)
 TRACKING_ISSUE_TITLE="Tracking Out of Date Golang Versions"
 
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Shared cache files (used by all lookup scripts)
-CACHE_DIR="$SCRIPT_DIR/caches"
-CACHE_FILE="$CACHE_DIR/no-gomod.txt"
-FORK_CACHE_FILE="$CACHE_DIR/forks.txt"
-
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
+# Initialize shared cache paths
+init_cache_paths
 
 # Clear cache if requested
 if [ "$CLEAR_CACHE" = true ]; then
-	echo -e "${YELLOW}🗑️  Clearing caches...${RESET}"
-	rm -f "$CACHE_FILE" "$FORK_CACHE_FILE"
-	echo -e "${GREEN}✅ Caches cleared${RESET}"
+	echo -e "${YELLOW}Clearing caches...${RESET}"
+	rm -f "$NOGOMOD_CACHE" "$FORK_CACHE"
+	echo -e "${GREEN}Caches cleared${RESET}"
 	echo
 fi
 
-# Load cache of non-Go repos
-if [ -f "$CACHE_FILE" ]; then
-	NON_GO_REPOS=$(cat "$CACHE_FILE")
-	CACHE_SIZE=$(echo "$NON_GO_REPOS" | wc -l | tr -d ' ')
-	echo -e "${BLUE}📦 Loaded non-Go repo cache: ${CACHE_SIZE} repositories${RESET}"
-else
-	NON_GO_REPOS=""
-fi
-
-# Load cache of fork repos
-if [ -f "$FORK_CACHE_FILE" ]; then
-	FORK_REPOS=$(cat "$FORK_CACHE_FILE")
-	FORK_CACHE_SIZE=$(echo "$FORK_REPOS" | wc -l | tr -d ' ')
-	echo -e "${BLUE}🍴 Loaded fork cache: ${FORK_CACHE_SIZE} repositories${RESET}"
-else
-	FORK_REPOS=""
-fi
+# Load and display shared caches
+load_shared_caches
 
 # Load blocklist of repos to exclude
-BLOCKLIST_FILE="scripts/go-version-repo-blocklist.txt"
+BLOCKLIST_FILE="${SCRIPT_DIR}/go-version-repo-blocklist.txt"
 BLOCKLIST=""
 if [ -f "$BLOCKLIST_FILE" ]; then
-	# Read and normalize blocklist entries
 	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
 		# Skip empty lines and comments
 		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
 		# Normalize repo format
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		repo=$(normalize_repo "$repo_input")
 		[[ -z "$repo" ]] && continue
 		BLOCKLIST="${BLOCKLIST}${repo}"$'\n'
 	done <"$BLOCKLIST_FILE"
 	BLOCKLIST_SIZE=$(echo "$BLOCKLIST" | grep -c '^' 2>/dev/null || echo "0")
 	if [ "$BLOCKLIST_SIZE" -gt 0 ]; then
-		echo -e "${YELLOW}🚫 Loaded blocklist: ${BLOCKLIST_SIZE} repositories will be excluded${RESET}"
+		echo -e "${YELLOW}Loaded blocklist: ${BLOCKLIST_SIZE} repositories will be excluded${RESET}"
 	fi
 else
-	echo -e "${BLUE}📝 No blocklist found (${BLOCKLIST_FILE})${RESET}"
+	echo -e "${BLUE}No blocklist found (${BLOCKLIST_FILE})${RESET}"
 fi
 
 # Temporary files to store results
@@ -218,13 +170,19 @@ ORG_DATA_FILE=$(mktemp)
 CACHE_UPDATES=$(mktemp)
 FORK_CACHE_UPDATES=$(mktemp)
 
+# Cleanup temp files on exit
+cleanup() {
+	rm -f "$OUTDATED_REPOS_FILE" "$ORG_DATA_FILE" "$CACHE_UPDATES" "$FORK_CACHE_UPDATES"
+}
+trap cleanup EXIT
+
 # Fetch stable and archived versions from go.dev/dl/
-echo -e "${BLUE}${BOLD}📡 Fetching Go version information from go.dev/dl/${RESET}"
+echo -e "${BLUE}${BOLD}Fetching Go version information from go.dev/dl/${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 
 GO_DL_PAGE=$(curl -s "https://go.dev/dl/")
 if [[ $? -ne 0 ]]; then
-	echo -e "${RED}❌ ERROR: Failed to fetch go.dev/dl/ page${RESET}"
+	echo -e "${RED}ERROR: Failed to fetch go.dev/dl/ page${RESET}"
 	exit 1
 fi
 
@@ -237,44 +195,44 @@ STABLE_COUNT=$(echo "$STABLE_VERSIONS" | wc -l | tr -d ' ')
 # Extract major versions (e.g., go1.25 from go1.25.4) for default checking
 STABLE_MAJOR_VERSIONS=$(echo "$STABLE_VERSIONS" | sed -E 's/^(go[0-9]+\.[0-9]+).*/\1/' | sort -u)
 
-echo -e "${GREEN}✅ Found ${STABLE_COUNT} stable Go versions${RESET}"
+echo -e "${GREEN}Found ${STABLE_COUNT} stable Go versions${RESET}"
 echo -e "${BLUE}Stable versions:${RESET} $(echo $STABLE_VERSIONS | head -5 | tr '\n' ' ')..."
 if [ "$CHECK_MINOR" = true ]; then
-	echo -e "${YELLOW}⚙️  Mode: Checking patch versions (--check-minor enabled)${RESET}"
+	echo -e "${YELLOW}Mode: Checking patch versions (--check-minor enabled)${RESET}"
 else
-	echo -e "${YELLOW}⚙️  Mode: Checking major versions only (use --check-minor to check patches)${RESET}"
+	echo -e "${YELLOW}Mode: Checking major versions only (use --check-minor to check patches)${RESET}"
 fi
 
 # Fetch Kubernetes go.mod to see what version they use
-echo -e "${BLUE}📦 Fetching Kubernetes Go versions...${RESET}"
+echo -e "${BLUE}Fetching Kubernetes Go versions...${RESET}"
 K8S_GO_VERSION=$(curl -s "https://raw.githubusercontent.com/kubernetes/kubernetes/master/go.mod" | grep -E '^go [0-9]+\.[0-9]+' | awk '{print $2}' | head -1)
 if [ -n "$K8S_GO_VERSION" ]; then
-	echo -e "${GREEN}✅ Upstream Kubernetes is using Go ${K8S_GO_VERSION}${RESET}"
+	echo -e "${GREEN}Upstream Kubernetes is using Go ${K8S_GO_VERSION}${RESET}"
 else
-	echo -e "${YELLOW}⚠️  Unable to fetch upstream Kubernetes Go version${RESET}"
+	echo -e "${YELLOW}Unable to fetch upstream Kubernetes Go version${RESET}"
 	K8S_GO_VERSION="unknown"
 fi
 
 # Fetch OpenShift Kubernetes fork go.mod
 OPENSHIFT_K8S_GO_VERSION=$(curl -s "https://raw.githubusercontent.com/openshift/kubernetes/master/go.mod" | grep -E '^go [0-9]+\.[0-9]+' | awk '{print $2}' | head -1)
 if [ -n "$OPENSHIFT_K8S_GO_VERSION" ]; then
-	echo -e "${GREEN}✅ OpenShift Kubernetes is using Go ${OPENSHIFT_K8S_GO_VERSION}${RESET}"
+	echo -e "${GREEN}OpenShift Kubernetes is using Go ${OPENSHIFT_K8S_GO_VERSION}${RESET}"
 else
-	echo -e "${YELLOW}⚠️  Unable to fetch OpenShift Kubernetes Go version${RESET}"
+	echo -e "${YELLOW}Unable to fetch OpenShift Kubernetes Go version${RESET}"
 	OPENSHIFT_K8S_GO_VERSION="unknown"
 fi
 
 # If both Kubernetes version fetches failed, GitHub is likely unavailable
 if [ "$K8S_GO_VERSION" = "unknown" ] && [ "$OPENSHIFT_K8S_GO_VERSION" = "unknown" ]; then
 	echo
-	echo -e "${RED}${BOLD}❌ ERROR: Unable to fetch data from GitHub${RESET}"
+	echo -e "${RED}${BOLD}ERROR: Unable to fetch data from GitHub${RESET}"
 	echo -e "${RED}─────────────────────────────────────────────────────${RESET}"
 	echo -e "${YELLOW}This script requires access to GitHub's raw content API.${RESET}"
 	echo -e "${YELLOW}Possible causes:${RESET}"
-	echo -e "${YELLOW}  • GitHub is experiencing an outage${RESET}"
-	echo -e "${YELLOW}  • Your internet connection is down${RESET}"
-	echo -e "${YELLOW}  • GitHub's raw content API is blocked${RESET}"
-	echo -e "${YELLOW}  • Rate limiting is in effect${RESET}"
+	echo -e "${YELLOW}  - GitHub is experiencing an outage${RESET}"
+	echo -e "${YELLOW}  - Your internet connection is down${RESET}"
+	echo -e "${YELLOW}  - GitHub's raw content API is blocked${RESET}"
+	echo -e "${YELLOW}  - Rate limiting is in effect${RESET}"
 	echo
 	echo -e "${BLUE}Please check GitHub's status at: https://www.githubstatus.com/${RESET}"
 	echo -e "${BLUE}Then try running the script again once GitHub is accessible.${RESET}"
@@ -554,18 +512,18 @@ ${recommended_action_text}
 			# Reopen if closed, but only if there's no "Closed" comment
 			if [ "$issue_state" = "CLOSED" ]; then
 				if has_closed_comment "$repo" "$issue_number"; then
-					echo -e "${YELLOW}✓ Updated (kept closed - has 'Closed' comment)${RESET}" >&2
+					echo -e "${YELLOW}Updated (kept closed - has 'Closed' comment)${RESET}" >&2
 				else
 					gh issue reopen "$issue_number" --repo "$repo" &>/dev/null
-					echo -e "${GREEN}✓ Updated and reopened${RESET}" >&2
+					echo -e "${GREEN}Updated and reopened${RESET}" >&2
 				fi
 			else
-				echo -e "${GREEN}✓ Updated${RESET}" >&2
+				echo -e "${GREEN}Updated${RESET}" >&2
 			fi
-			echo -e "      ${BLUE}→ https://github.com/${repo}/issues/${issue_number}${RESET}" >&2
+			echo -e "      ${BLUE}-> https://github.com/${repo}/issues/${issue_number}${RESET}" >&2
 			echo "$issue_number" # Return issue number
 		else
-			echo -e "${RED}✗ Failed to update${RESET}" >&2
+			echo -e "${RED}Failed to update${RESET}" >&2
 			echo "" # Return empty string on failure
 		fi
 	else
@@ -574,11 +532,11 @@ ${recommended_action_text}
 		local issue_url=$(gh issue create --repo "$repo" --title "$issue_title" --body "$issue_body" 2>/dev/null)
 		if [ $? -eq 0 ]; then
 			local issue_number=$(echo "$issue_url" | grep -oE '[0-9]+$')
-			echo -e "${GREEN}✓ Issue created${RESET}" >&2
-			echo -e "      ${BLUE}→ ${issue_url}${RESET}" >&2
+			echo -e "${GREEN}Issue created${RESET}" >&2
+			echo -e "      ${BLUE}-> ${issue_url}${RESET}" >&2
 			echo "$issue_number" # Return issue number
 		else
-			echo -e "${RED}✗ Failed to create issue${RESET}" >&2
+			echo -e "${RED}Failed to create issue${RESET}" >&2
 			echo "" # Return empty string on failure
 		fi
 	fi
@@ -595,21 +553,21 @@ close_github_issue() {
 	if [ -n "$existing_issue" ]; then
 		echo -ne " [Closing issue #${existing_issue}... " >&2
 		if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-			echo -e "${GREEN}✓ Closed]${RESET}" >&2
+			echo -e "${GREEN}Closed]${RESET}" >&2
 		else
-			echo -e "${RED}✗ Failed]${RESET}" >&2
+			echo -e "${RED}Failed]${RESET}" >&2
 		fi
 	fi
 }
 
-echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR OUTDATED GO VERSIONS${RESET}"
+echo -e "${BLUE}${BOLD}SCANNING REPOSITORIES FOR OUTDATED GO VERSIONS${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 
 # Get latest stable version for issue creation
 LATEST_STABLE=$(echo "$STABLE_VERSIONS" | tail -1 | sed 's/^go//')
 
 for ORG_NAME in "${ORGS[@]}"; do
-	echo -e "${YELLOW}${BOLD}👉 Organization: ${ORG_NAME}${RESET}"
+	echo -e "${YELLOW}${BOLD}Organization: ${ORG_NAME}${RESET}"
 
 	# Get all repos first (including fork status)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
@@ -629,10 +587,10 @@ for ORG_NAME in "${ORGS[@]}"; do
 		[[ -z "$repo" ]] && continue
 
 		# Show a simple progress indicator
-		echo -ne "   📂 ${repo} on branch ${branch}... "
+		echo -ne "   ${repo} on branch ${branch}... "
 
 		# Check fork cache first
-		if echo "$FORK_REPOS" | grep -q "^${repo}$"; then
+		if is_in_cache "$repo" "$FORK_CACHE"; then
 			echo -e "${YELLOW}skipped (fork - cached)${RESET}"
 			# Close any existing issues on forks
 			if [ "$CREATE_ISSUES" = true ]; then
@@ -640,9 +598,9 @@ for ORG_NAME in "${ORGS[@]}"; do
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 			fi
@@ -660,9 +618,9 @@ for ORG_NAME in "${ORGS[@]}"; do
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 			fi
@@ -678,9 +636,9 @@ for ORG_NAME in "${ORGS[@]}"; do
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on blocklisted repo... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 			fi
@@ -688,7 +646,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 		fi
 
 		# Check cache first
-		if echo "$NON_GO_REPOS" | grep -q "^${repo}$"; then
+		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
 			echo -e "${YELLOW}no go.mod (cached)${RESET}"
 			continue
 		fi
@@ -712,7 +670,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 		toolchain_version=$(extract_toolchain_version "$go_mod")
 
 		if [[ -z "$go_version" ]]; then
-			echo -e "${YELLOW}⚠ No Go version specified${RESET}"
+			echo -e "${YELLOW}No Go version specified${RESET}"
 			continue
 		fi
 
@@ -733,17 +691,17 @@ for ORG_NAME in "${ORGS[@]}"; do
 
 		# Check if effective version is acceptable (stable on go.dev or >= OCP recommended)
 		if is_version_acceptable "$effective_version"; then
-			echo -ne "${GREEN}✓ Up-to-date (${version_display})${RESET}"
+			echo -ne "${GREEN}Up-to-date (${version_display})${RESET}"
 			# Close any existing tracking issues since repo is now up-to-date
 			close_github_issue "$repo" "go${effective_version}"
 			echo # New line after potential issue closing message
 		else
 			if [ "$CHECK_MINOR" = true ]; then
-				echo -e "${RED}✗ OUTDATED (${version_display})${RESET}"
+				echo -e "${RED}OUTDATED (${version_display})${RESET}"
 			else
 				# Extract major version for display
 				major_version=$(echo "$effective_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-				echo -e "${RED}✗ OUTDATED (${version_display} - below OCP recommended ${OPENSHIFT_K8S_GO_VERSION})${RESET}"
+				echo -e "${RED}OUTDATED (${version_display} - below OCP recommended ${OPENSHIFT_K8S_GO_VERSION})${RESET}"
 			fi
 			ORG_OUTDATED=$((ORG_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
@@ -761,7 +719,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 
 	# Summary for this organization
 	echo
-	echo -e "${YELLOW}${BOLD}📊 Summary for ${ORG_NAME}:${RESET}"
+	echo -e "${YELLOW}${BOLD}Summary for ${ORG_NAME}:${RESET}"
 	echo -e "   ${BLUE}Go repositories found:${RESET} ${ORG_GO_REPOS}"
 	echo -e "   ${RED}Outdated repositories:${RESET} ${ORG_OUTDATED}"
 	if [ $ORG_GO_REPOS -gt 0 ]; then
@@ -773,9 +731,9 @@ for ORG_NAME in "${ORGS[@]}"; do
 done
 
 # Scan individual repositories from go-version-repo-list.txt if it exists
-REPO_LIST_FILE="scripts/go-version-repo-list.txt"
+REPO_LIST_FILE="${SCRIPT_DIR}/go-version-repo-list.txt"
 if [ -f "$REPO_LIST_FILE" ]; then
-	echo -e "${YELLOW}${BOLD}👉 Individual Repositories from ${REPO_LIST_FILE}${RESET}"
+	echo -e "${YELLOW}${BOLD}Individual Repositories from ${REPO_LIST_FILE}${RESET}"
 
 	# Track results for individual repos
 	INDIVIDUAL_OUTDATED=0
@@ -785,17 +743,17 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		# Skip empty lines and comments (# or //)
 		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
 
-		# Normalize repo format: extract owner/repo from various formats
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		# Normalize repo format
+		repo=$(normalize_repo "$repo_input")
 
 		# Skip if still empty after normalization
 		[[ -z "$repo" ]] && continue
 
 		# Get default branch and fork status for the repo
-		echo -ne "   📂 ${repo}... "
+		echo -ne "   ${repo}... "
 
 		# Check fork cache first
-		if echo "$FORK_REPOS" | grep -q "^${repo}$"; then
+		if is_in_cache "$repo" "$FORK_CACHE"; then
 			echo -e "${YELLOW}skipped (fork - cached)${RESET}"
 			# Close any existing issues on forks
 			if [ "$CREATE_ISSUES" = true ]; then
@@ -803,9 +761,9 @@ if [ -f "$REPO_LIST_FILE" ]; then
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 			fi
@@ -813,7 +771,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		fi
 
 		# Check non-Go cache
-		if echo "$NON_GO_REPOS" | grep -q "^${repo}$"; then
+		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
 			echo -e "${YELLOW}no go.mod (cached)${RESET}"
 			continue
 		fi
@@ -821,7 +779,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		repo_info=$(gh repo view "$repo" --json defaultBranchRef,isFork 2>/dev/null)
 
 		if [[ $? -ne 0 || -z "$repo_info" ]]; then
-			echo -e "${RED}✗ Failed to fetch repo info${RESET}"
+			echo -e "${RED}Failed to fetch repo info${RESET}"
 			continue
 		fi
 
@@ -839,9 +797,9 @@ if [ -f "$REPO_LIST_FILE" ]; then
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on fork... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 			fi
@@ -857,9 +815,9 @@ if [ -f "$REPO_LIST_FILE" ]; then
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on blocklisted repo... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 			fi
@@ -887,7 +845,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		toolchain_version=$(extract_toolchain_version "$go_mod")
 
 		if [[ -z "$go_version" ]]; then
-			echo -e "${YELLOW}⚠ No Go version specified${RESET}"
+			echo -e "${YELLOW}No Go version specified${RESET}"
 			continue
 		fi
 
@@ -908,17 +866,17 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		# Check if effective version is acceptable (stable on go.dev or >= OCP recommended)
 		if is_version_acceptable "$effective_version"; then
-			echo -ne "${GREEN}✓ Up-to-date (${version_display})${RESET}"
+			echo -ne "${GREEN}Up-to-date (${version_display})${RESET}"
 			# Close any existing tracking issues since repo is now up-to-date
 			close_github_issue "$repo" "go${effective_version}"
 			echo # New line after potential issue closing message
 		else
 			if [ "$CHECK_MINOR" = true ]; then
-				echo -e "${RED}✗ OUTDATED (${version_display})${RESET}"
+				echo -e "${RED}OUTDATED (${version_display})${RESET}"
 			else
 				# Extract major version for display
 				major_version=$(echo "$effective_version" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
-				echo -e "${RED}✗ OUTDATED (${version_display} - below OCP recommended ${OPENSHIFT_K8S_GO_VERSION})${RESET}"
+				echo -e "${RED}OUTDATED (${version_display} - below OCP recommended ${OPENSHIFT_K8S_GO_VERSION})${RESET}"
 			fi
 			INDIVIDUAL_OUTDATED=$((INDIVIDUAL_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
@@ -935,7 +893,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 	# Summary for individual repositories
 	echo
-	echo -e "${YELLOW}${BOLD}📊 Summary for Individual Repositories:${RESET}"
+	echo -e "${YELLOW}${BOLD}Summary for Individual Repositories:${RESET}"
 	echo -e "   ${BLUE}Go repositories found:${RESET} ${INDIVIDUAL_GO_REPOS}"
 	echo -e "   ${RED}Outdated repositories:${RESET} ${INDIVIDUAL_OUTDATED}"
 	if [ $INDIVIDUAL_GO_REPOS -gt 0 ]; then
@@ -947,7 +905,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 fi
 
 # Final summary
-echo -e "${BOLD}${BLUE}📈 FINAL RESULTS:${RESET}"
+echo -e "${BOLD}${BLUE}FINAL RESULTS:${RESET}"
 echo -e "${BOLD}   Total repositories scanned:${RESET} ${TOTAL_REPOS}"
 echo -e "${BOLD}   Go repositories found:${RESET} ${TOTAL_GO_REPOS}"
 echo -e "${BOLD}   Repositories with outdated Go versions:${RESET} ${RED}${OUTDATED_COUNT}${RESET}"
@@ -964,9 +922,9 @@ echo
 # Detailed report of outdated repositories
 if [ $OUTDATED_COUNT -gt 0 ]; then
 	if [ "$CHECK_MINOR" = true ]; then
-		echo -e "${RED}${BOLD}⚠️  DETAILED REPORT: REPOSITORIES WITH OUTDATED GO VERSIONS (Patch-Level Check)${RESET}"
+		echo -e "${RED}${BOLD}DETAILED REPORT: REPOSITORIES WITH OUTDATED GO VERSIONS (Patch-Level Check)${RESET}"
 	else
-		echo -e "${RED}${BOLD}⚠️  DETAILED REPORT: REPOSITORIES WITH OUTDATED GO VERSIONS (Major Version Check)${RESET}"
+		echo -e "${RED}${BOLD}DETAILED REPORT: REPOSITORIES WITH OUTDATED GO VERSIONS (Major Version Check)${RESET}"
 	fi
 	echo -e "${RED}─────────────────────────────────────────────────────${RESET}"
 	echo
@@ -987,7 +945,7 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 
 	# Check for existing issues and update ORG_DATA_FILE with issue numbers
 	# This runs regardless of --create-issues flag
-	echo -e "${BLUE}${BOLD}🔍 Checking for Existing GitHub Issues${RESET}"
+	echo -e "${BLUE}${BOLD}Checking for Existing GitHub Issues${RESET}"
 	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 	echo
 
@@ -996,7 +954,7 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 
 	# Check each outdated repo for existing issues
 	sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
-		echo -ne "   📂 Checking ${repo}... " >&2
+		echo -ne "   Checking ${repo}... " >&2
 
 		# Search for existing Go version/toolchain issues (both open and closed)
 		existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state all --json number,title,state --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | \"\(.number)|\(.state)\"" | head -1)
@@ -1031,17 +989,17 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 
 	# Create GitHub issues if requested
 	if [ "$CREATE_ISSUES" = true ]; then
-		echo -e "${YELLOW}${BOLD}📝 Creating/Updating GitHub Issues for Outdated Repositories${RESET}"
+		echo -e "${YELLOW}${BOLD}Creating/Updating GitHub Issues for Outdated Repositories${RESET}"
 		echo -e "${YELLOW}─────────────────────────────────────────────────────${RESET}"
 		echo
 
 		# Calculate cutoff date for "last year" (365 days ago)
-		ONE_YEAR_AGO=$(date -u -v-365d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "365 days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+		ONE_YEAR_AGO=$(calculate_cutoff_date 365)
 
 		if [ -z "$ONE_YEAR_AGO" ]; then
-			echo -e "${RED}⚠️  Warning: Unable to calculate one year ago date. All outdated repos will receive issues.${RESET}" >&2
+			echo -e "${RED}Warning: Unable to calculate one year ago date. All outdated repos will receive issues.${RESET}" >&2
 		else
-			echo -e "${BLUE}   Activity cutoff date: ${ONE_YEAR_AGO:0:10} (repos inactive since then will be skipped)${RESET}" >&2
+			echo -e "${BLUE}   Activity cutoff date: $(format_date "$ONE_YEAR_AGO") (repos inactive since then will be skipped)${RESET}" >&2
 		fi
 
 		# Create a temporary file to store repo -> issue number mappings
@@ -1049,20 +1007,17 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 
 		# Use ORG_DATA_FILE to access last_commit timestamps
 		sort -t'|' -k2 "$ORG_DATA_FILE" | while IFS='|' read -r org repo version branch last_commit tracking_issue tc_version; do
-			# Debug: Show what we're comparing
-			# echo -e "      ${BLUE}[DEBUG] ${repo}: last_commit='${last_commit}' vs ONE_YEAR_AGO='${ONE_YEAR_AGO}'${RESET}" >&2
-
 			# Only create issues for repos updated in the last year
 			if [ -n "$ONE_YEAR_AGO" ] && [ "$last_commit" != "unknown" ] && [ "$last_commit" \< "$ONE_YEAR_AGO" ]; then
-				echo -e "      ${YELLOW}⏩ Skipping ${repo} (last updated: ${last_commit:0:10}, inactive for >1 year)${RESET}" >&2
+				echo -e "      ${YELLOW}Skipping ${repo} (last updated: $(format_date "$last_commit"), inactive for >1 year)${RESET}" >&2
 				# Close any existing issues on inactive repos
 				existing_issue=$(gh issue list --repo "$repo" --search "Update Go" --state open --json number,title --jq ".[] | select(.title | test(\"Update Go (version|toolchain) from|Add Go toolchain\")) | .number" | head -1)
 				if [ -n "$existing_issue" ]; then
 					echo -ne "      Closing issue #${existing_issue} on inactive repo... " >&2
 					if gh issue close "$existing_issue" --repo "$repo" &>/dev/null; then
-						echo -e "${GREEN}✓ Closed${RESET}" >&2
+						echo -e "${GREEN}Closed${RESET}" >&2
 					else
-						echo -e "${RED}✗ Failed${RESET}" >&2
+						echo -e "${RED}Failed${RESET}" >&2
 					fi
 				fi
 				continue
@@ -1097,17 +1052,17 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 		fi
 
 		echo
-		echo -e "${GREEN}✅ Issue creation process completed${RESET}"
+		echo -e "${GREEN}Issue creation process completed${RESET}"
 		echo
 	else
-		echo -e "${YELLOW}💡 Tip: Run with --create-issues flag to automatically create GitHub issues for outdated repositories${RESET}"
+		echo -e "${YELLOW}Tip: Run with --create-issues flag to automatically create GitHub issues for outdated repositories${RESET}"
 		echo
 	fi
 fi
 
 # Update tracking issue
 if [ "$UPDATE_TRACKING" = true ]; then
-	echo -e "${BLUE}${BOLD}📋 Updating Central Tracking Issue${RESET}"
+	echo -e "${BLUE}${BOLD}Updating Central Tracking Issue${RESET}"
 	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 	echo -e "${BLUE}   Building issue body with ${OUTDATED_COUNT} outdated repositories...${RESET}"
 
@@ -1125,8 +1080,8 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 	ISSUE_BODY="# Go Version Status Report
 
-**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-**Check Mode:** $([ "$CHECK_MINOR" = true ] && echo "Patch-level (including minor versions)" || echo "Major version only")  
+**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+**Check Mode:** $([ "$CHECK_MINOR" = true ] && echo "Patch-level (including minor versions)" || echo "Major version only")
 **Latest Stable Go Version:** \`go${LATEST_STABLE}\`${k8s_ref}
 
 ## Summary
@@ -1142,7 +1097,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 
 	if [ $OUTDATED_COUNT -gt 0 ]; then
 		# Calculate cutoff date for "last year" (365 days ago)
-		ONE_YEAR_AGO=$(date -u -v-365d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "365 days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+		ONE_YEAR_AGO=$(calculate_cutoff_date 365)
 
 		# Group by organization and create tables
 		for ORG_NAME in "${ORGS[@]}" "Individual Repositories"; do
@@ -1216,7 +1171,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 							echo "${repo}|${issue_num}|0" >>"$COMMENT_CACHE"
 						fi
 					done
-					echo -e "      ${GREEN}✓ Comment status fetched${RESET}" >&2
+					echo -e "      ${GREEN}Comment status fetched${RESET}" >&2
 				fi
 
 				# Sort by last commit date (most recent first) and add each repo to the table
@@ -1231,10 +1186,9 @@ if [ "$UPDATE_TRACKING" = true ]; then
 					if [ -n "$tc_version" ]; then
 						version_display="${version_display} (tc: ${tc_version})"
 					fi
-					# Format the date nicely (from ISO8601 to readable format)
+					# Format the date nicely
 					if [ "$last_commit" != "unknown" ]; then
-						# Try macOS date format first, then Linux, then fall back to raw
-						last_commit_display=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_commit" "+%Y-%m-%d" 2>/dev/null || date -d "$last_commit" "+%Y-%m-%d" 2>/dev/null || echo "${last_commit:0:10}")
+						last_commit_display=$(format_date "$last_commit")
 					else
 						last_commit_display="Unknown"
 					fi
@@ -1273,9 +1227,9 @@ Repositories listed above are using Go versions below the OCP recommended versio
 
 "
 	else
-		ISSUE_BODY+="## ✅ All Clear!
+		ISSUE_BODY+="## All Clear!
 
-All scanned Go repositories are using up-to-date Go versions. Great work! 🎉
+All scanned Go repositories are using up-to-date Go versions. Great work!
 
 "
 	fi
@@ -1284,60 +1238,15 @@ All scanned Go repositories are using up-to-date Go versions. Great work! 🎉
 
 *This issue is automatically updated by the [go-version-checker.sh](https://github.com/${TRACKING_REPO}/blob/main/scripts/go-version-checker.sh) script.*"
 
-	# Check if tracking issue exists
+	# Upsert the tracking issue
 	echo -e "${BLUE}   Issue body built successfully${RESET}"
-	echo -ne "   Checking for existing tracking issue... "
-	EXISTING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title,state --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
-
-	if [ -n "$EXISTING_ISSUE" ]; then
-		echo -e "${GREEN}found (#${EXISTING_ISSUE})${RESET}"
-		echo -ne "   Updating issue #${EXISTING_ISSUE}... "
-
-		# Check if issue is closed and reopen it if there are outdated repos
-		ISSUE_STATE=$(gh issue view "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --json state --jq '.state')
-		if [ "$ISSUE_STATE" = "CLOSED" ] && [ $OUTDATED_COUNT -gt 0 ]; then
-			gh issue reopen "$EXISTING_ISSUE" --repo "$TRACKING_REPO" &>/dev/null
-		fi
-
-		if gh issue edit "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --body "$ISSUE_BODY" &>/dev/null; then
-			echo -e "${GREEN}✓ Updated${RESET}"
-			echo -e "   ${BLUE}View at: https://github.com/${TRACKING_REPO}/issues/${EXISTING_ISSUE}${RESET}"
-		else
-			echo -e "${RED}✗ Failed to update${RESET}"
-		fi
-	else
-		echo -e "${YELLOW}not found${RESET}"
-		echo -ne "   Creating new tracking issue... "
-
-		NEW_ISSUE=$(gh issue create --repo "$TRACKING_REPO" --title "$TRACKING_ISSUE_TITLE" --body "$ISSUE_BODY" 2>/dev/null)
-		if [ $? -eq 0 ]; then
-			ISSUE_NUMBER=$(echo "$NEW_ISSUE" | grep -oE '[0-9]+$')
-			echo -e "${GREEN}✓ Created (#${ISSUE_NUMBER})${RESET}"
-			echo -e "   ${BLUE}View at: ${NEW_ISSUE}${RESET}"
-		else
-			echo -e "${RED}✗ Failed to create${RESET}"
-		fi
-	fi
+	upsert_tracking_issue "$TRACKING_ISSUE_TITLE" "$ISSUE_BODY" "$OUTDATED_COUNT"
 
 	echo
 fi
 
 # Save updated caches
-if [ -f "$CACHE_UPDATES" ] && [ -s "$CACHE_UPDATES" ]; then
-	cat "$CACHE_UPDATES" "$CACHE_FILE" 2>/dev/null | sort -u >"${CACHE_FILE}.tmp"
-	mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
-	NEW_CACHE_COUNT=$(wc -l <"$CACHE_UPDATES" | tr -d ' ')
-	echo -e "${BLUE}💾 Non-Go repo cache updated: Added ${NEW_CACHE_COUNT} repositories${RESET}"
-fi
+merge_cache "$CACHE_UPDATES" "$NOGOMOD_CACHE" "non-Go repo"
+merge_cache "$FORK_CACHE_UPDATES" "$FORK_CACHE" "fork"
 
-if [ -f "$FORK_CACHE_UPDATES" ] && [ -s "$FORK_CACHE_UPDATES" ]; then
-	cat "$FORK_CACHE_UPDATES" "$FORK_CACHE_FILE" 2>/dev/null | sort -u >"${FORK_CACHE_FILE}.tmp"
-	mv "${FORK_CACHE_FILE}.tmp" "$FORK_CACHE_FILE"
-	NEW_FORK_COUNT=$(wc -l <"$FORK_CACHE_UPDATES" | tr -d ' ')
-	echo -e "${BLUE}🍴 Fork cache updated: Added ${NEW_FORK_COUNT} repositories${RESET}"
-fi
-
-# Cleanup
-rm -f "$OUTDATED_REPOS_FILE" "$ORG_DATA_FILE" "$CACHE_UPDATES" "$FORK_CACHE_UPDATES"
-
-echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"
+echo -e "${GREEN}${BOLD}Scan completed successfully!${RESET}"

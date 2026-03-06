@@ -59,13 +59,9 @@
 #   - Migration guide included in script output
 #===============================================================================
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
+# Get script directory for relative paths (must be set before sourcing common.sh)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
 # Parse command line arguments
 FORCE_REFRESH=false
@@ -83,32 +79,26 @@ for arg in "$@"; do
 	fi
 done
 
-# Check if GitHub CLI is installed
-echo "🔧 Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "${RED}❌ ERROR: GitHub CLI (gh) is not installed!${RESET}"
-	echo -e "${YELLOW}💡 Please install it first:${RESET}"
-	echo -e "${YELLOW}   macOS: brew install gh${RESET}"
-	echo -e "${YELLOW}   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md${RESET}"
-	echo -e "${YELLOW}   Or visit: https://cli.github.com/${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}✅ GitHub CLI is installed${RESET}"
+# Check prerequisites
+require_tool gh curl
+check_gh_auth
 
-# Check if GitHub CLI is logged in
-echo "🔒 Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "${RED}❌ ERROR: GitHub CLI is not logged in!${RESET}"
-	echo -e "${YELLOW}💡 Please run 'gh auth login' to authenticate first.${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}✅ GitHub CLI authenticated successfully${RESET}"
-echo
+# Configuration
+ORGS=("${DEFAULT_ORGS[@]}")
+LIMIT=$DEFAULT_LIMIT
+INACTIVITY_DAYS=180
 
-# List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
+# Initialize shared caches
+init_cache_paths
 
-LIMIT=1000
+# Script-specific results cache (not shared)
+RESULTS_CACHE=".ioutil-checker-results.json"
+OUTPUT_MD="ioutil-usage-report.md"
+
+# Cache age threshold (in seconds) - 6 hours
+CACHE_MAX_AGE=$((6 * 60 * 60))
+
+# Counters
 FOUND_COUNT=0
 TOTAL_REPOS=0
 SKIPPED_FORKS=0
@@ -116,40 +106,27 @@ SKIPPED_NOGO=0
 SKIPPED_ABANDONED=0
 SKIPPED_TRACKING_ISSUE=0
 
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+#===============================================================================
+# LOAD CACHES
+#===============================================================================
 
-# Shared cache files (used by all lookup scripts)
-CACHE_DIR="$SCRIPT_DIR/caches"
-FORK_CACHE="$CACHE_DIR/forks.txt"
-NOGO_CACHE="$CACHE_DIR/no-gomod.txt"
-ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
-# Script-specific results cache (not shared)
-RESULTS_CACHE=".ioutil-checker-results.json"
-OUTPUT_MD="ioutil-usage-report.md"
+load_shared_caches
+echo
 
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
+# Calculate cutoff date
+CUTOFF_DATE=$(calculate_cutoff_date "$INACTIVITY_DAYS")
 
-# Inactivity threshold (in days)
-INACTIVITY_DAYS=180 # 6 months
+# Temporary files
+NOGOMOD_TEMP=$(mktemp)
+ORG_DATA_FILE=$(mktemp)
+TRACKING_ISSUE_CACHE=$(mktemp)
 
-# Cache age threshold (in seconds) - 6 hours
-CACHE_MAX_AGE=$((6 * 60 * 60))
-
-# Create empty cache files if they don't exist
-touch "$FORK_CACHE" "$NOGO_CACHE" "$ABANDONED_CACHE"
+# Cleanup temporary files on exit
+trap 'rm -f "$NOGOMOD_TEMP" "$ORG_DATA_FILE" "$TRACKING_ISSUE_CACHE"' EXIT
 
 #===============================================================================
 # HELPER FUNCTIONS - Must be defined before use
 #===============================================================================
-
-# Helper function to check if repo is in cache
-is_in_cache() {
-	local repo="$1"
-	local cache_file="$2"
-	grep -Fxq "$repo" "$cache_file" 2>/dev/null
-}
 
 # Helper function to check if results cache is valid (less than 6 hours old)
 is_cache_valid() {
@@ -183,71 +160,6 @@ is_cache_valid() {
 		return 1
 	fi
 }
-
-#===============================================================================
-# LOAD CACHES
-#===============================================================================
-
-# Load fork cache info if it exists
-FORK_COUNT_LOADED=0
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	FORK_COUNT_LOADED=$(wc -l <"$FORK_CACHE" | tr -d ' ')
-	echo "📋 Loading fork cache from $FORK_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${FORK_COUNT_LOADED} fork repositories to skip${RESET}"
-	echo
-fi
-
-# Load no-Go cache info if it exists
-NOGO_COUNT_LOADED=0
-if [ -f "$NOGO_CACHE" ] && [ -s "$NOGO_CACHE" ]; then
-	NOGO_COUNT_LOADED=$(wc -l <"$NOGO_CACHE" | tr -d ' ')
-	echo "📋 Loading no-Go cache from $NOGO_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${NOGO_COUNT_LOADED} non-Go repositories to skip${RESET}"
-	echo
-fi
-
-# Load abandoned repo cache info if it exists
-ABANDONED_COUNT_LOADED=0
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	ABANDONED_COUNT_LOADED=$(wc -l <"$ABANDONED_CACHE" | tr -d ' ')
-	echo "📋 Loading abandoned repo cache from $ABANDONED_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${ABANDONED_COUNT_LOADED} abandoned repositories to skip${RESET}"
-	echo
-fi
-
-# Check results cache validity
-CACHE_VALID=false
-if is_cache_valid; then
-	CACHE_VALID=true
-	CACHED_REPO_COUNT=$(jq '.repositories | length' "$RESULTS_CACHE" 2>/dev/null || echo "0")
-	CACHE_TIMESTAMP=$(jq -r '.timestamp' "$RESULTS_CACHE" 2>/dev/null || echo "unknown")
-	echo "📋 Loading results cache from $RESULTS_CACHE..."
-	echo -e "${GREEN}✓ Cache is valid (age < 6 hours)${RESET}"
-	echo -e "${GREEN}✓ Loaded ${CACHED_REPO_COUNT} cached results from ${CACHE_TIMESTAMP}${RESET}"
-	echo
-else
-	if [ -f "$RESULTS_CACHE" ]; then
-		if [ "$FORCE_REFRESH" = true ]; then
-			echo "📋 Results cache exists but --force flag set, ignoring cache..."
-		else
-			echo "📋 Results cache is stale (age > 6 hours), will refresh..."
-		fi
-	else
-		echo "📋 No results cache found, will scan all repositories..."
-	fi
-	echo
-fi
-
-# Calculate cutoff date (6 months ago)
-CUTOFF_DATE=$(date -u -v-${INACTIVITY_DAYS}d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${INACTIVITY_DAYS} days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
-
-if [ -z "$CUTOFF_DATE" ]; then
-	echo -e "${RED}❌ ERROR: Unable to calculate cutoff date${RESET}" >&2
-	exit 1
-fi
-
-# Temporary file to track newly discovered non-Go repos
-NOGO_TEMP=$(mktemp)
 
 # Helper function to get cached result for a repository
 get_cached_result() {
@@ -305,29 +217,6 @@ update_cache_timestamp() {
 	if [ -f "$RESULTS_CACHE" ]; then
 		local temp_cache=$(mktemp)
 		jq ".timestamp = \"$timestamp\"" "$RESULTS_CACHE" >"$temp_cache" 2>/dev/null && mv "$temp_cache" "$RESULTS_CACHE" || rm -f "$temp_cache"
-	fi
-}
-
-# Helper function to check if repo is abandoned (no commits in last 6 months)
-is_repo_abandoned() {
-	local repo="$1"
-	local branch="$2"
-
-	# Fetch last commit date from default branch
-	local last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null)
-
-	if [[ $? -ne 0 || -z "$last_commit" ]]; then
-		# Unable to fetch commit date, don't mark as abandoned
-		return 1
-	fi
-
-	# Compare dates
-	if [ "$last_commit" \< "$CUTOFF_DATE" ]; then
-		# Repo is abandoned
-		return 0
-	else
-		# Repo is active
-		return 1
 	fi
 }
 
@@ -391,7 +280,7 @@ check_ioutil_pr() {
 
 	# Filter PRs that have ioutil-related keywords in the title
 	# Return format: #123;URL;STATUS;NEEDS_REBASE (STATUS = open/merged/closed)
-	local pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("ioutil|io/ioutil"; "i")) | 
+	local pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("ioutil|io/ioutil"; "i")) |
 		if .mergedAt != null then
 			"#" + (.number|tostring) + ";" + .url + ";merged;no"
 		elif .state == "OPEN" then
@@ -430,17 +319,10 @@ check_ioutil_pr() {
 }
 
 # Tracking issue configuration
-TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking Deprecated io/ioutil Package Usage"
 
 # Array to store repositories using deprecated io/ioutil
 declare -a DEPRECATED_REPOS
-
-# Temporary file to store org-specific data for tracking issue
-ORG_DATA_FILE=$(mktemp)
-
-# Temporary file to store tracking issue cache
-TRACKING_ISSUE_CACHE=$(mktemp)
 
 # Helper function to fetch and parse tracking issue
 fetch_tracking_issue() {
@@ -527,6 +409,29 @@ is_recently_confirmed() {
 	fi
 }
 
+# Check results cache validity
+CACHE_VALID=false
+if is_cache_valid; then
+	CACHE_VALID=true
+	CACHED_REPO_COUNT=$(jq '.repositories | length' "$RESULTS_CACHE" 2>/dev/null || echo "0")
+	CACHE_TIMESTAMP=$(jq -r '.timestamp' "$RESULTS_CACHE" 2>/dev/null || echo "unknown")
+	echo "📋 Loading results cache from $RESULTS_CACHE..."
+	echo -e "${GREEN}✓ Cache is valid (age < 6 hours)${RESET}"
+	echo -e "${GREEN}✓ Loaded ${CACHED_REPO_COUNT} cached results from ${CACHE_TIMESTAMP}${RESET}"
+	echo
+else
+	if [ -f "$RESULTS_CACHE" ]; then
+		if [ "$FORCE_REFRESH" = true ]; then
+			echo "📋 Results cache exists but --force flag set, ignoring cache..."
+		else
+			echo "📋 Results cache is stale (age > 6 hours), will refresh..."
+		fi
+	else
+		echo "📋 No results cache found, will scan all repositories..."
+	fi
+	echo
+fi
+
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR DEPRECATED IO/IOUTIL USAGE${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
 echo -e "${YELLOW}⚠️  Note: io/ioutil was deprecated in Go 1.16 (February 2021)${RESET}"
@@ -599,7 +504,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 		fi
 
 		# Check if repo is in no-Go cache
-		if is_in_cache "$repo" "$NOGO_CACHE"; then
+		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
 			echo -e "${BLUE}⏩ skipped (no go.mod)${RESET}"
 			SKIPPED_NOGO=$((SKIPPED_NOGO + 1))
 			continue
@@ -683,7 +588,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 			update_cache_result "$repo" "false" "true"
 		elif [ $result -eq 3 ]; then
 			echo -e "${YELLOW}no go.mod (cached)${RESET}"
-			echo "$repo" >>"$NOGO_TEMP"
+			echo "$repo" >>"$NOGOMOD_TEMP"
 			SKIPPED_NOGO=$((SKIPPED_NOGO + 1))
 			# Update cache
 			update_cache_result "$repo" "null" "true" "no_gomod"
@@ -714,24 +619,14 @@ for ORG_NAME in "${ORGS[@]}"; do
 done
 
 # Update no-Go cache
-if [ -f "$NOGO_TEMP" ] && [ -s "$NOGO_TEMP" ]; then
-	cat "$NOGO_TEMP" >>"$NOGO_CACHE"
-	sort -u "$NOGO_CACHE" -o "$NOGO_CACHE"
-	NEW_NOGO=$(wc -l <"$NOGO_TEMP" | tr -d ' ')
-	echo -e "${BLUE}💾 Updated no-Go cache with ${NEW_NOGO} new entries${RESET}"
+merge_cache "$NOGOMOD_TEMP" "$NOGOMOD_CACHE" "no-Go"
+if [ -f "$NOGOMOD_TEMP" ] && [ -s "$NOGOMOD_TEMP" ]; then
 	echo
 fi
-rm -f "$NOGO_TEMP"
 
-# Sort and deduplicate fork cache
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	sort -u "$FORK_CACHE" -o "$FORK_CACHE"
-fi
-
-# Sort and deduplicate abandoned cache
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	sort -u "$ABANDONED_CACHE" -o "$ABANDONED_CACHE"
-fi
+# Sort and deduplicate fork and abandoned caches
+dedup_cache "$FORK_CACHE"
+dedup_cache "$ABANDONED_CACHE"
 
 # Final summary
 echo -e "${BOLD}${BLUE}📈 FINAL RESULTS:${RESET}"
@@ -904,8 +799,8 @@ echo -e "${BLUE}   Building issue body with ${FOUND_COUNT} repositories using de
 # Build the issue body
 ISSUE_BODY="# Deprecated io/ioutil Usage Report
 
-**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-**Replacement:** Use \`io\` and \`os\` packages  
+**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+**Replacement:** Use \`io\` and \`os\` packages
 **Reference:** [Go 1.16 Release Notes](https://go.dev/doc/go1.16)
 
 ## Summary
@@ -947,8 +842,7 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				repo_display=$(echo "$repo_name" | sed 's/|/\\|/g')
 				# Format the date nicely (from ISO8601 to readable format)
 				if [ "$last_commit" != "unknown" ]; then
-					# Try macOS date format first, then Linux, then fall back to raw
-					last_commit_display=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_commit" "+%Y-%m-%d" 2>/dev/null || date -d "$last_commit" "+%Y-%m-%d" 2>/dev/null || echo "${last_commit:0:10}")
+					last_commit_display=$(format_date "$last_commit")
 				else
 					last_commit_display="Unknown"
 				fi
@@ -1034,7 +928,7 @@ The following table shows the replacements for deprecated \`io/ioutil\` function
    \`\`\`go
    // Remove this:
    import \"io/ioutil\"
-   
+
    // Add these as needed:
    import \"io\"
    import \"os\"
@@ -1071,48 +965,14 @@ ISSUE_BODY+="---
 
 *This issue is automatically updated by the [ioutil-deprecation-checker.sh](https://github.com/${TRACKING_REPO}/blob/main/scripts/ioutil-deprecation-checker.sh) script.*"
 
-# Check if tracking issue exists
+# Update or create tracking issue
 echo -e "${BLUE}   Issue body built successfully${RESET}"
-echo -ne "   Checking for existing tracking issue... "
-EXISTING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title,state --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
-
-if [ -n "$EXISTING_ISSUE" ]; then
-	echo -e "${GREEN}found (#${EXISTING_ISSUE})${RESET}"
-	echo -ne "   Updating issue #${EXISTING_ISSUE}... "
-
-	# Check if issue is closed and reopen it if there are repos using deprecated io/ioutil
-	ISSUE_STATE=$(gh issue view "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --json state --jq '.state')
-	if [ "$ISSUE_STATE" = "CLOSED" ] && [ $FOUND_COUNT -gt 0 ]; then
-		gh issue reopen "$EXISTING_ISSUE" --repo "$TRACKING_REPO" &>/dev/null
-	fi
-
-	if gh issue edit "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --body "$ISSUE_BODY" &>/dev/null; then
-		echo -e "${GREEN}✓ Updated${RESET}"
-		echo -e "   ${BLUE}View at: https://github.com/${TRACKING_REPO}/issues/${EXISTING_ISSUE}${RESET}"
-	else
-		echo -e "${RED}✗ Failed to update${RESET}"
-	fi
-else
-	echo -e "${YELLOW}not found${RESET}"
-	echo -ne "   Creating new tracking issue... "
-
-	NEW_ISSUE=$(gh issue create --repo "$TRACKING_REPO" --title "$TRACKING_ISSUE_TITLE" --body "$ISSUE_BODY" 2>/dev/null)
-	if [ $? -eq 0 ]; then
-		ISSUE_NUMBER=$(echo "$NEW_ISSUE" | grep -oE '[0-9]+$')
-		echo -e "${GREEN}✓ Created (#${ISSUE_NUMBER})${RESET}"
-		echo -e "   ${BLUE}View at: ${NEW_ISSUE}${RESET}"
-	else
-		echo -e "${RED}✗ Failed to create${RESET}"
-	fi
-fi
+upsert_tracking_issue "$TRACKING_ISSUE_TITLE" "$ISSUE_BODY" "$FOUND_COUNT"
 
 echo
 
 # Update cache timestamp
 echo -e "${BLUE}💾 Updating results cache timestamp...${RESET}"
 update_cache_timestamp
-
-# Cleanup temporary files
-rm -f "$ORG_DATA_FILE" "$TRACKING_ISSUE_CACHE"
 
 echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"

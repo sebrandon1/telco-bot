@@ -66,141 +66,64 @@
 #   - Recommended replacement: go.uber.org/mock
 #===============================================================================
 
-# Check if GitHub CLI is installed
-echo "🔧 Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI (gh) is not installed!\033[0m"
-	echo -e "\033[0;33m💡 Please install it first:\033[0m"
-	echo -e "\033[0;33m   macOS: brew install gh\033[0m"
-	echo -e "\033[0;33m   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md\033[0m"
-	echo -e "\033[0;33m   Or visit: https://cli.github.com/\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI is installed\033[0m"
+# Load shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
 
-# Check if GitHub CLI is logged in
-echo "🔒 Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI is not logged in!\033[0m"
-	echo -e "\033[0;33m💡 Please run 'gh auth login' to authenticate first.\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI authenticated successfully\033[0m"
+# Prerequisite checks
+echo "Checking prerequisites..."
+require_tool gh curl
+check_gh_auth
+echo -e "${GREEN}All prerequisites met${RESET}"
 echo
 
-# List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
+# Configuration
+ORGS=("${DEFAULT_ORGS[@]}")
+LIMIT=$DEFAULT_LIMIT
+INACTIVITY_DAYS=$DEFAULT_INACTIVITY_DAYS
+TRACKING_ISSUE_TITLE="Tracking Deprecated golang/mock Usage"
+OUTPUT_MD="gomock-usage-report.md"
 
-LIMIT=1000
+# Counters
 FOUND_COUNT=0
 TOTAL_REPOS=0
 SKIPPED_FORKS=0
 SKIPPED_NOGOMOD=0
 SKIPPED_ABANDONED=0
 
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Initialize caches
+init_cache_paths
+load_shared_caches
 
-# Shared cache files (used by all lookup scripts)
-CACHE_DIR="$SCRIPT_DIR/caches"
-FORK_CACHE="$CACHE_DIR/forks.txt"
-NOGOMOD_CACHE="$CACHE_DIR/no-gomod.txt"
-ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
-OUTPUT_MD="gomock-usage-report.md"
+# Calculate cutoff date
+CUTOFF_DATE=$(calculate_cutoff_date "$INACTIVITY_DAYS")
 
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
-
-# Inactivity threshold (in days)
-INACTIVITY_DAYS=180 # 6 months
-
-# Create empty cache files if they don't exist
-touch "$FORK_CACHE" "$NOGOMOD_CACHE" "$ABANDONED_CACHE"
-
-# Load fork cache info if it exists
-FORK_COUNT_LOADED=0
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	FORK_COUNT_LOADED=$(wc -l <"$FORK_CACHE" | tr -d ' ')
-	echo "📋 Loading fork cache from $FORK_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${FORK_COUNT_LOADED} fork repositories to skip${RESET}"
-	echo
-fi
-
-# Load no-go.mod cache info if it exists
-NOGOMOD_COUNT_LOADED=0
-if [ -f "$NOGOMOD_CACHE" ] && [ -s "$NOGOMOD_CACHE" ]; then
-	NOGOMOD_COUNT_LOADED=$(wc -l <"$NOGOMOD_CACHE" | tr -d ' ')
-	echo "📋 Loading no-go.mod cache from $NOGOMOD_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${NOGOMOD_COUNT_LOADED} repositories without go.mod to skip${RESET}"
-	echo
-fi
-
-# Load abandoned repo cache info if it exists
-ABANDONED_COUNT_LOADED=0
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	ABANDONED_COUNT_LOADED=$(wc -l <"$ABANDONED_CACHE" | tr -d ' ')
-	echo "📋 Loading abandoned repo cache from $ABANDONED_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${ABANDONED_COUNT_LOADED} abandoned repositories to skip${RESET}"
-	echo
-fi
-
-# Calculate cutoff date (6 months ago)
-CUTOFF_DATE=$(date -u -v-${INACTIVITY_DAYS}d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${INACTIVITY_DAYS} days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
-
-if [ -z "$CUTOFF_DATE" ]; then
-	echo -e "${RED}❌ ERROR: Unable to calculate cutoff date${RESET}" >&2
-	exit 1
-fi
-
-# Temporary file to track newly discovered no-go.mod repos
+# Temporary file for newly discovered no-go.mod repos
 NOGOMOD_TEMP=$(mktemp)
+ORG_DATA_FILE=$(mktemp)
+trap 'rm -f "$NOGOMOD_TEMP" "$ORG_DATA_FILE" "${ORG_DATA_FILE}.table"' EXIT
 
-# Helper function to check if repo is in cache
-is_in_cache() {
-	local repo="$1"
-	local cache_file="$2"
-	grep -Fxq "$repo" "$cache_file" 2>/dev/null
-}
+# Array to store repositories using deprecated golang/mock
+declare -a DEPRECATED_REPOS
 
-# Helper function to check if repo is abandoned (no commits in last 6 months)
-is_repo_abandoned() {
-	local repo="$1"
-	local branch="$2"
+#===============================================================================
+# SCRIPT-SPECIFIC HELPERS
+#===============================================================================
 
-	# Fetch last commit date from default branch
-	local last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null)
-
-	if [[ $? -ne 0 || -z "$last_commit" ]]; then
-		# Unable to fetch commit date, don't mark as abandoned
-		return 1
-	fi
-
-	# Compare dates
-	if [ "$last_commit" \< "$CUTOFF_DATE" ]; then
-		# Repo is abandoned
-		return 0
-	else
-		# Repo is active
-		return 1
-	fi
-}
-
-# Helper function to check for PRs related to gomock migration (open, closed, or merged)
+# Check for PRs related to gomock migration (open, closed, or merged)
 check_gomock_pr() {
 	local repo="$1"
 
-	# List all PRs (open, closed, merged) and filter for gomock-related keywords
-	# Check both open and closed PRs (closed includes merged)
-	local pr_search=$(gh pr list --repo "$repo" --state all --json number,title,url,state,mergedAt --limit 100 2>/dev/null)
+	local pr_search
+	pr_search=$(gh pr list --repo "$repo" --state all --json number,title,url,state,mergedAt --limit 100 2>/dev/null)
 
 	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
 		echo "none"
 		return
 	fi
 
-	# Filter PRs that have gomock-related keywords in the title
-	# Return format: #123;URL;STATUS (STATUS = open/merged/closed)
-	local pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|mockgen|golang/mock|uber-go/mock|uber.org/mock|go.uber.org/mock"; "i")) | 
+	local pr_info
+	pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|mockgen|golang/mock|uber-go/mock|uber.org/mock|go.uber.org/mock"; "i")) |
 		if .mergedAt != null then
 			"#" + (.number|tostring) + ";" + .url + ";merged"
 		elif .state == "OPEN" then
@@ -216,26 +139,23 @@ check_gomock_pr() {
 	fi
 }
 
-# Helper function to check if an open PR needs a rebase
+# Check if an open PR needs a rebase
 check_pr_needs_rebase() {
 	local repo="$1"
 	local pr_number="$2"
 
-	# Get PR mergeable state
-	local pr_details=$(gh pr view "$pr_number" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)
+	local pr_details
+	pr_details=$(gh pr view "$pr_number" --repo "$repo" --json mergeable,mergeStateStatus 2>/dev/null)
 
 	if [[ $? -ne 0 || -z "$pr_details" ]]; then
 		echo "unknown"
 		return
 	fi
 
-	# Check if PR is behind base branch or has conflicts
-	local mergeable=$(echo "$pr_details" | jq -r '.mergeable // "UNKNOWN"')
-	local merge_state=$(echo "$pr_details" | jq -r '.mergeStateStatus // "UNKNOWN"')
+	local mergeable merge_state
+	mergeable=$(echo "$pr_details" | jq -r '.mergeable // "UNKNOWN"')
+	merge_state=$(echo "$pr_details" | jq -r '.mergeStateStatus // "UNKNOWN"')
 
-	# BEHIND means the PR needs to be updated with base branch changes
-	# CONFLICTING means there are merge conflicts
-	# BLOCKED can indicate various issues including being out of date
 	if [ "$merge_state" = "BEHIND" ] || [ "$merge_state" = "DIRTY" ]; then
 		echo "needs_rebase"
 	elif [ "$mergeable" = "CONFLICTING" ]; then
@@ -247,37 +167,110 @@ check_pr_needs_rebase() {
 	fi
 }
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
+# Scan a single repo for deprecated golang/mock usage.
+# Usage: scan_repo_for_gomock "org/repo" "branch" "OrgLabel"
+# Returns 0 if deprecated usage found, 1 otherwise.
+scan_repo_for_gomock() {
+	local repo="$1"
+	local branch="$2"
+	local org_label="$3"
 
-# Tracking issue configuration
-TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
-TRACKING_ISSUE_TITLE="Tracking Deprecated golang/mock Usage"
+	local raw_url="https://raw.githubusercontent.com/$repo/$branch/go.mod"
+	local go_mod
+	go_mod=$(curl -s -f "$raw_url")
 
-# Array to store repositories using deprecated golang/mock
-declare -a DEPRECATED_REPOS
+	if [[ $? -ne 0 ]]; then
+		echo -e "${YELLOW}no go.mod (cached)${RESET}"
+		echo "$repo" >>"$NOGOMOD_TEMP"
+		SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
+		return 1
+	fi
 
-# Temporary file to store org-specific data for tracking issue (with last commit date and PR status)
-ORG_DATA_FILE=$(mktemp)
+	if echo "$go_mod" | grep -E '^[[:space:]]*github\.com/golang/mock' | grep -vq '// indirect'; then
+		echo -e "${RED}USES DEPRECATED golang/mock${RESET}"
+		DEPRECATED_REPOS+=("$repo")
 
-echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR DEPRECATED GOLANG/MOCK USAGE${RESET}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
-echo -e "${YELLOW}⚠️  Note: github.com/golang/mock was archived in June 2023${RESET}"
-echo -e "${YELLOW}    Recommended replacement: go.uber.org/mock${RESET}"
-echo -e "${BLUE}───────────────────────────────────────────────────────────${RESET}"
-echo -e "${BLUE}📅 Skipping repos with no commits since: ${CUTOFF_DATE:0:10}${RESET}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
+		local last_commit
+		last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
+
+		local pr_status pr_rebase_status=""
+		pr_status=$(check_gomock_pr "$repo")
+
+		if [[ "$pr_status" != "none" ]]; then
+			local pr_state
+			pr_state=$(echo "$pr_status" | cut -d';' -f3)
+			if [ "$pr_state" = "open" ]; then
+				local pr_number
+				pr_number=$(echo "$pr_status" | cut -d';' -f1 | sed 's/#//')
+				pr_rebase_status=$(check_pr_needs_rebase "$repo" "$pr_number")
+			fi
+		fi
+
+		echo "$org_label|$repo|$branch|$last_commit|$pr_status|$pr_rebase_status" >>"$ORG_DATA_FILE"
+		return 0
+	else
+		echo -e "${GREEN}No deprecated usage${RESET}"
+		return 1
+	fi
+}
+
+# Skip-check a repo against caches and abandoned status.
+# Echoes skip reason and returns 0 if skipped, 1 if should scan.
+skip_check_repo() {
+	local repo="$1"
+	local branch="$2"
+	local is_fork="$3"
+
+	# Fork check
+	if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
+		echo -e "${BLUE}skipped (fork)${RESET}"
+		SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
+		if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
+			echo "$repo" >>"$FORK_CACHE"
+		fi
+		return 0
+	fi
+
+	# Abandoned cache check
+	if is_in_cache "$repo" "$ABANDONED_CACHE"; then
+		echo -e "${BLUE}skipped (abandoned)${RESET}"
+		SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
+		return 0
+	fi
+
+	# Live abandoned check
+	if is_repo_abandoned "$repo" "$branch"; then
+		echo -e "${BLUE}skipped (abandoned - no recent commits)${RESET}"
+		echo "$repo" >>"$ABANDONED_CACHE"
+		SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
+		return 0
+	fi
+
+	# No-go.mod cache check
+	if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
+		echo -e "${BLUE}skipped (no go.mod)${RESET}"
+		SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
+		return 0
+	fi
+
+	return 1
+}
+
+#===============================================================================
+# MAIN SCAN
+#===============================================================================
+
+echo -e "${BLUE}${BOLD}SCANNING REPOSITORIES FOR DEPRECATED GOLANG/MOCK USAGE${RESET}"
+echo -e "${BLUE}=======================================================${RESET}"
+echo -e "${YELLOW}Note: github.com/golang/mock was archived in June 2023${RESET}"
+echo -e "${YELLOW}  Recommended replacement: go.uber.org/mock${RESET}"
+echo -e "${BLUE}Skipping repos with no commits since: ${CUTOFF_DATE:0:10}${RESET}"
+echo -e "${BLUE}=======================================================${RESET}"
 echo
 
 for ORG_NAME in "${ORGS[@]}"; do
-	echo -e "${YELLOW}${BOLD}👉 Organization: ${ORG_NAME}${RESET}"
+	echo -e "${YELLOW}${BOLD}Organization: ${ORG_NAME}${RESET}"
 
-	# Get all repos first (including fork status)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
 	REPOS=$(gh repo list "$ORG_NAME" --limit "$LIMIT" --json nameWithOwner,defaultBranchRef,isArchived,isFork -q '.[] | select(.isArchived == false) | .nameWithOwner + " " + .defaultBranchRef.name + " " + (.isFork | tostring)')
 	REPO_COUNT=$(echo "$REPOS" | grep -v '^$' | wc -l | tr -d ' ')
@@ -286,139 +279,54 @@ for ORG_NAME in "${ORGS[@]}"; do
 	echo -e "${BLUE}   Found ${REPO_COUNT} active repositories to scan${RESET}"
 	echo
 
-	# Track results for this organization
 	ORG_FOUND=0
-
-	# Use a separate file to store results to overcome the subshell limitation
 	temp_results=$(mktemp)
 
 	while read -r repo branch is_fork; do
-		# Skip empty lines
 		[[ -z "$repo" ]] && continue
 
-		# Show a simple progress indicator
-		echo -ne "   📂 ${repo} on branch ${branch}... "
+		echo -ne "   ${repo} on branch ${branch}... "
 
-		# Check if repo is a fork (either from cache or API)
-		if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
-			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
-			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
-			# Add to cache if detected via API but not in cache yet
-			if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
-				echo "$repo" >>"$FORK_CACHE"
-			fi
+		if skip_check_repo "$repo" "$branch" "$is_fork"; then
 			continue
 		fi
 
-		# Check if repo is in abandoned cache
-		if is_in_cache "$repo" "$ABANDONED_CACHE"; then
-			echo -e "${BLUE}⏩ skipped (abandoned)${RESET}"
-			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
-			continue
-		fi
-
-		# Check if repo is abandoned (no commits in last 6 months)
-		if is_repo_abandoned "$repo" "$branch"; then
-			echo -e "${BLUE}⏩ skipped (abandoned - no recent commits)${RESET}"
-			echo "$repo" >>"$ABANDONED_CACHE"
-			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
-			continue
-		fi
-
-		# Check if repo is in no-go.mod cache
-		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
-			echo -e "${BLUE}⏩ skipped (no go.mod)${RESET}"
-			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
-			continue
-		fi
-
-		# Fetch go.mod raw content from default branch
-		raw_url="https://raw.githubusercontent.com/$repo/$branch/go.mod"
-		go_mod=$(curl -s -f "$raw_url")
-
-		if [[ $? -ne 0 ]]; then
-			echo -e "${YELLOW}no go.mod (cached)${RESET}"
-			echo "$repo" >>"$NOGOMOD_TEMP"
-			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
-			continue
-		fi
-
-		# Check for direct dependency on deprecated golang/mock (exclude // indirect)
-		if echo "$go_mod" | grep -E '^[[:space:]]*github\.com/golang/mock' | grep -vq '// indirect'; then
-			echo -e "${RED}⚠️  USES DEPRECATED golang/mock${RESET}"
+		# Pass ORG_NAME as first arg for ORG_DATA_FILE grouping
+		if scan_repo_for_gomock "$repo" "$branch" "$ORG_NAME"; then
 			echo "$repo" >>"$temp_results"
-			DEPRECATED_REPOS+=("$repo")
-
-			# Fetch last commit date from default branch for tracking issue
-			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
-
-			# Check for PRs related to gomock migration
-			pr_status=$(check_gomock_pr "$repo")
-
-			# If PR is open, check if it needs a rebase
-			pr_rebase_status=""
-			if [[ "$pr_status" != "none" ]]; then
-				pr_state=$(echo "$pr_status" | cut -d';' -f3)
-				if [ "$pr_state" = "open" ]; then
-					pr_number=$(echo "$pr_status" | cut -d';' -f1 | sed 's/#//')
-					pr_rebase_status=$(check_pr_needs_rebase "$repo" "$pr_number")
-				fi
-			fi
-
-			# Store for org-specific data: org|repo|branch|last_commit|pr_status|pr_rebase_status
-			echo "$ORG_NAME|$repo|$branch|$last_commit|$pr_status|$pr_rebase_status" >>"$ORG_DATA_FILE"
-		else
-			echo -e "${GREEN}✓ No deprecated usage${RESET}"
 		fi
 	done <<<"$REPOS"
 
-	# Count the results
 	if [ -f "$temp_results" ] && [ -s "$temp_results" ]; then
 		ORG_FOUND=$(wc -l <"$temp_results" | tr -d ' ')
 		FOUND_COUNT=$((FOUND_COUNT + ORG_FOUND))
-		rm "$temp_results"
-	elif [ -f "$temp_results" ]; then
-		rm "$temp_results"
 	fi
+	rm -f "$temp_results"
 
-	# Summary for this organization
 	echo
-	echo -e "${YELLOW}${BOLD}📊 Summary for ${ORG_NAME}:${RESET}"
+	echo -e "${YELLOW}${BOLD}Summary for ${ORG_NAME}:${RESET}"
 	echo -e "   ${RED}${ORG_FOUND}${RESET} repositories using deprecated github.com/golang/mock"
-	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
+	echo -e "${BLUE}-----------------------------------------------------${RESET}"
 	echo
 done
 
-# Scan individual repositories from gomock-repo-list.txt if it exists
+# Scan individual repositories from gomock-repo-list.txt
 REPO_LIST_FILE="gomock-repo-list.txt"
 if [ -f "$REPO_LIST_FILE" ]; then
-	echo -e "${YELLOW}${BOLD}👉 Individual Repositories from ${REPO_LIST_FILE}${RESET}"
+	echo -e "${YELLOW}${BOLD}Individual Repositories from ${REPO_LIST_FILE}${RESET}"
 
-	# Track results for individual repos
 	INDIVIDUAL_FOUND=0
 	INDIVIDUAL_COUNT=0
-
-	# Use a separate file to store results
 	temp_results=$(mktemp)
 
-	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
-		# Skip empty lines and comments (# or //)
-		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
-
-		# Normalize repo format: extract owner/repo from various formats
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
-
-		# Skip if still empty after normalization
-		[[ -z "$repo" ]] && continue
-
+	while IFS= read -r repo; do
 		INDIVIDUAL_COUNT=$((INDIVIDUAL_COUNT + 1))
 
-		# Get default branch and fork status for the repo
-		echo -ne "   📂 ${repo}... "
+		echo -ne "   ${repo}... "
 		repo_info=$(gh repo view "$repo" --json defaultBranchRef,isFork 2>/dev/null)
 
 		if [[ $? -ne 0 || -z "$repo_info" ]]; then
-			echo -e "${RED}✗ Failed to fetch repo info${RESET}"
+			echo -e "${RED}Failed to fetch repo info${RESET}"
 			continue
 		fi
 
@@ -427,127 +335,44 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		echo -ne "on branch ${branch}... "
 
-		# Check if repo is a fork (either from cache or API)
-		if is_in_cache "$repo" "$FORK_CACHE" || [ "$is_fork" = "true" ]; then
-			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
-			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
-			# Add to cache if detected via API but not in cache yet
-			if [ "$is_fork" = "true" ] && ! is_in_cache "$repo" "$FORK_CACHE"; then
-				echo "$repo" >>"$FORK_CACHE"
-			fi
+		if skip_check_repo "$repo" "$branch" "$is_fork"; then
 			continue
 		fi
 
-		# Check if repo is in abandoned cache
-		if is_in_cache "$repo" "$ABANDONED_CACHE"; then
-			echo -e "${BLUE}⏩ skipped (abandoned)${RESET}"
-			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
-			continue
-		fi
-
-		# Check if repo is abandoned (no commits in last 6 months)
-		if is_repo_abandoned "$repo" "$branch"; then
-			echo -e "${BLUE}⏩ skipped (abandoned - no recent commits)${RESET}"
-			echo "$repo" >>"$ABANDONED_CACHE"
-			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
-			continue
-		fi
-
-		# Check if repo is in no-go.mod cache
-		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
-			echo -e "${BLUE}⏩ skipped (no go.mod)${RESET}"
-			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
-			continue
-		fi
-
-		# Fetch go.mod raw content from default branch
-		raw_url="https://raw.githubusercontent.com/$repo/$branch/go.mod"
-		go_mod=$(curl -s -f "$raw_url")
-
-		if [[ $? -ne 0 ]]; then
-			echo -e "${YELLOW}no go.mod (cached)${RESET}"
-			echo "$repo" >>"$NOGOMOD_TEMP"
-			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
-			continue
-		fi
-
-		# Check for direct dependency on deprecated golang/mock (exclude // indirect)
-		if echo "$go_mod" | grep -E '^[[:space:]]*github\.com/golang/mock' | grep -vq '// indirect'; then
-			echo -e "${RED}⚠️  USES DEPRECATED golang/mock${RESET}"
+		if scan_repo_for_gomock "$repo" "$branch" "Individual Repositories"; then
 			echo "$repo" >>"$temp_results"
-			DEPRECATED_REPOS+=("$repo")
-
-			# Fetch last commit date from default branch for tracking issue
-			last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null || echo "unknown")
-
-			# Check for PRs related to gomock migration
-			pr_status=$(check_gomock_pr "$repo")
-
-			# If PR is open, check if it needs a rebase
-			pr_rebase_status=""
-			if [[ "$pr_status" != "none" ]]; then
-				pr_state=$(echo "$pr_status" | cut -d';' -f3)
-				if [ "$pr_state" = "open" ]; then
-					pr_number=$(echo "$pr_status" | cut -d';' -f1 | sed 's/#//')
-					pr_rebase_status=$(check_pr_needs_rebase "$repo" "$pr_number")
-				fi
-			fi
-
-			# Store for org-specific data: org|repo|branch|last_commit|pr_status|pr_rebase_status
-			echo "Individual Repositories|$repo|$branch|$last_commit|$pr_status|$pr_rebase_status" >>"$ORG_DATA_FILE"
-		else
-			echo -e "${GREEN}✓ No deprecated usage${RESET}"
 		fi
-	done <"$REPO_LIST_FILE"
+	done < <(read_repo_list "$REPO_LIST_FILE")
 
-	# Count the results
 	if [ -f "$temp_results" ] && [ -s "$temp_results" ]; then
 		INDIVIDUAL_FOUND=$(wc -l <"$temp_results" | tr -d ' ')
 		FOUND_COUNT=$((FOUND_COUNT + INDIVIDUAL_FOUND))
 		TOTAL_REPOS=$((TOTAL_REPOS + INDIVIDUAL_COUNT))
-		rm "$temp_results"
-	elif [ -f "$temp_results" ]; then
+	else
 		TOTAL_REPOS=$((TOTAL_REPOS + INDIVIDUAL_COUNT))
-		rm "$temp_results"
 	fi
+	rm -f "$temp_results"
 
-	# Summary for individual repositories
 	echo
-	echo -e "${YELLOW}${BOLD}📊 Summary for Individual Repositories:${RESET}"
+	echo -e "${YELLOW}${BOLD}Summary for Individual Repositories:${RESET}"
 	echo -e "   ${RED}${INDIVIDUAL_FOUND}${RESET} repositories using deprecated github.com/golang/mock (out of ${INDIVIDUAL_COUNT} scanned)"
-	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
+	echo -e "${BLUE}-----------------------------------------------------${RESET}"
 	echo
 fi
 
-# Update no-go.mod cache
-if [ -f "$NOGOMOD_TEMP" ] && [ -s "$NOGOMOD_TEMP" ]; then
-	cat "$NOGOMOD_TEMP" >>"$NOGOMOD_CACHE"
-	sort -u "$NOGOMOD_CACHE" -o "$NOGOMOD_CACHE"
-	NEW_NOGOMOD=$(wc -l <"$NOGOMOD_TEMP" | tr -d ' ')
-	echo -e "${BLUE}💾 Updated no-go.mod cache with ${NEW_NOGOMOD} new entries${RESET}"
-	echo
-fi
-rm -f "$NOGOMOD_TEMP"
-
-# Sort and deduplicate fork cache
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	sort -u "$FORK_CACHE" -o "$FORK_CACHE"
-fi
-
-# Sort and deduplicate abandoned cache
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	sort -u "$ABANDONED_CACHE" -o "$ABANDONED_CACHE"
-fi
+# Update caches
+merge_cache "$NOGOMOD_TEMP" "$NOGOMOD_CACHE" "no-go.mod"
+dedup_cache "$FORK_CACHE"
+dedup_cache "$ABANDONED_CACHE"
 
 # Final summary
-echo -e "${BOLD}${BLUE}📈 FINAL RESULTS:${RESET}"
+echo -e "${BOLD}${BLUE}FINAL RESULTS:${RESET}"
 echo -e "${BOLD}   Total repositories scanned:${RESET} ${TOTAL_REPOS}"
 echo -e "${BOLD}   Repositories skipped (forks):${RESET} ${BLUE}${SKIPPED_FORKS}${RESET}"
 echo -e "${BOLD}   Repositories skipped (abandoned):${RESET} ${BLUE}${SKIPPED_ABANDONED}${RESET}"
 echo -e "${BOLD}   Repositories skipped (no go.mod):${RESET} ${BLUE}${SKIPPED_NOGOMOD}${RESET}"
 echo -e "${BOLD}   Repositories with deprecated golang/mock:${RESET} ${RED}${FOUND_COUNT}${RESET}"
 
-# Calculate percentage safely (avoid division by zero)
 ACTUAL_SCANNED=$((TOTAL_REPOS - SKIPPED_FORKS - SKIPPED_ABANDONED - SKIPPED_NOGOMOD))
 if [ $ACTUAL_SCANNED -gt 0 ]; then
 	PERCENTAGE=$(awk "BEGIN { printf \"%.1f%%\", ($FOUND_COUNT/$ACTUAL_SCANNED)*100 }")
@@ -557,26 +382,29 @@ fi
 echo -e "${BOLD}   Usage percentage:${RESET} ${PERCENTAGE}"
 echo
 
-# Display table of repositories using deprecated golang/mock
+#===============================================================================
+# REPORTS
+#===============================================================================
+
 if [ ${#DEPRECATED_REPOS[@]} -gt 0 ]; then
-	echo -e "${RED}${BOLD}⚠️  REPOSITORIES USING DEPRECATED GOLANG/MOCK:${RESET}"
-	echo -e "${RED}═══════════════════════════════════════════════════════════${RESET}"
+	echo -e "${RED}${BOLD}REPOSITORIES USING DEPRECATED GOLANG/MOCK:${RESET}"
+	echo -e "${RED}=======================================================${RESET}"
 	echo
 	printf "${BOLD}%-60s${RESET} ${BOLD}%s${RESET}\n" "Repository" "URL"
-	printf "%s\n" "─────────────────────────────────────────────────────────────────────────────────────────────"
+	printf "%s\n" "-------------------------------------------------------------------------------------------------------------"
 
 	for repo in "${DEPRECATED_REPOS[@]}"; do
 		printf "%-60s https://github.com/%s\n" "$repo" "$repo"
 	done
 
 	echo
-	echo -e "${YELLOW}${BOLD}💡 RECOMMENDATION:${RESET}"
+	echo -e "${YELLOW}${BOLD}RECOMMENDATION:${RESET}"
 	echo -e "${YELLOW}   Migrate from github.com/golang/mock to go.uber.org/mock${RESET}"
 	echo -e "${YELLOW}   Reference: https://github.com/golang/mock (archived)${RESET}"
 	echo
 
 	# Generate Markdown report
-	echo "📝 Generating markdown report: $OUTPUT_MD"
+	echo "Generating markdown report: $OUTPUT_MD"
 	{
 		echo "# Deprecated golang/mock Usage Report"
 		echo ""
@@ -592,7 +420,7 @@ if [ ${#DEPRECATED_REPOS[@]} -gt 0 ]; then
 		echo "- **Repositories using deprecated golang/mock:** ${FOUND_COUNT}"
 		echo "- **Usage percentage:** ${PERCENTAGE}"
 		echo ""
-		echo "## ⚠️  Important Notice"
+		echo "## Important Notice"
 		echo ""
 		echo "The \`github.com/golang/mock\` package was **archived in June 2023** and is no longer maintained."
 		echo ""
@@ -644,13 +472,12 @@ if [ ${#DEPRECATED_REPOS[@]} -gt 0 ]; then
 		echo ""
 	} >"$OUTPUT_MD"
 
-	echo -e "${GREEN}✅ Markdown report saved to: $OUTPUT_MD${RESET}"
+	echo -e "${GREEN}Markdown report saved to: $OUTPUT_MD${RESET}"
 	echo
 else
-	echo -e "${GREEN}${BOLD}✅ Great! No repositories found using deprecated golang/mock${RESET}"
+	echo -e "${GREEN}${BOLD}Great! No repositories found using deprecated golang/mock${RESET}"
 	echo
 
-	# Generate empty report
 	{
 		echo "# Deprecated golang/mock Usage Report"
 		echo ""
@@ -665,26 +492,28 @@ else
 		echo "- **Repositories actually checked:** ${ACTUAL_SCANNED}"
 		echo "- **Repositories using deprecated golang/mock:** ${FOUND_COUNT}"
 		echo ""
-		echo "## ✅ Result"
+		echo "## Result"
 		echo ""
 		echo "**Great!** No repositories found using the deprecated \`github.com/golang/mock\` package."
 		echo ""
 	} >"$OUTPUT_MD"
 
-	echo "📝 Empty report saved to: $OUTPUT_MD"
+	echo "Empty report saved to: $OUTPUT_MD"
 	echo
 fi
 
-# Update tracking issue in telco-bot repo
-echo -e "${BLUE}${BOLD}📋 Updating Central Tracking Issue${RESET}"
-echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
+#===============================================================================
+# TRACKING ISSUE
+#===============================================================================
+
+echo -e "${BLUE}${BOLD}Updating Central Tracking Issue${RESET}"
+echo -e "${BLUE}-----------------------------------------------------${RESET}"
 echo -e "${BLUE}   Building issue body with ${FOUND_COUNT} repositories using deprecated golang/mock...${RESET}"
 
-# Build the issue body
 ISSUE_BODY="# Deprecated golang/mock Usage Report
 
-**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-**Replacement:** [go.uber.org/mock](https://github.com/uber-go/mock)  
+**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+**Replacement:** [go.uber.org/mock](https://github.com/uber-go/mock)
 **Reference:** [golang/mock (archived)](https://github.com/golang/mock)
 
 ## Summary
@@ -702,15 +531,12 @@ ISSUE_BODY="# Deprecated golang/mock Usage Report
 "
 
 if [ $FOUND_COUNT -gt 0 ]; then
-	# Group by organization and create tables
 	for ORG_NAME in "${ORGS[@]}" "Individual Repositories"; do
-		# Check if this org has any repos using deprecated golang/mock
 		ORG_REPOS=$(grep "^${ORG_NAME}|" "$ORG_DATA_FILE" 2>/dev/null || true)
 
 		if [ -n "$ORG_REPOS" ]; then
 			ORG_COUNT=$(echo "$ORG_REPOS" | wc -l | tr -d ' ')
 
-			# Create clickable org header (skip for "Individual Repositories")
 			if [ "$ORG_NAME" = "Individual Repositories" ]; then
 				ISSUE_BODY+="## ${ORG_NAME}
 
@@ -727,56 +553,32 @@ if [ $FOUND_COUNT -gt 0 ]; then
 |------------|--------------|-----------|
 "
 
-			# Sort by last commit date (most recent first) and add each repo to the table
 			echo "$ORG_REPOS" | sort -t'|' -k4 -r | while IFS='|' read -r org repo branch last_commit pr_status pr_rebase_status; do
-				# Extract just the repo name (without org prefix)
 				repo_name="${repo##*/}"
-				# Escape pipe characters in repo names if any
 				repo_display=$(echo "$repo_name" | sed 's/|/\\|/g')
-				# Format the date nicely (from ISO8601 to readable format)
-				if [ "$last_commit" != "unknown" ]; then
-					# Try macOS date format first, then Linux, then fall back to raw
-					last_commit_display=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_commit" "+%Y-%m-%d" 2>/dev/null || date -d "$last_commit" "+%Y-%m-%d" 2>/dev/null || echo "${last_commit:0:10}")
-				else
-					last_commit_display="Unknown"
-				fi
-				# Format PR status with emoji indicators
+				last_commit_display=$(format_date "$last_commit")
+
 				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
-					pr_display="—"
+					pr_display="---"
 				else
-					# Parse pr_status format: #123;https://github.com/org/repo/pull/123;status
 					pr_number=$(echo "$pr_status" | cut -d';' -f1)
 					pr_url=$(echo "$pr_status" | cut -d';' -f2)
 					pr_state=$(echo "$pr_status" | cut -d';' -f3)
 
-					# Add emoji based on PR state
 					case "$pr_state" in
-					"merged")
-						pr_emoji="✅"
-						;;
+					"merged") pr_emoji="V" ;;
 					"open")
-						pr_emoji="🔄"
-						# Add rebase status indicator for open PRs
+						pr_emoji="O"
 						if [ -n "$pr_rebase_status" ]; then
 							case "$pr_rebase_status" in
-							"needs_rebase")
-								pr_emoji="⚠️ 🔄"
-								;;
-							"has_conflicts")
-								pr_emoji="🔥 🔄"
-								;;
-							"up_to_date")
-								pr_emoji="✅ 🔄"
-								;;
+							"needs_rebase") pr_emoji="! O" ;;
+							"has_conflicts") pr_emoji="!! O" ;;
+							"up_to_date") pr_emoji="V O" ;;
 							esac
 						fi
 						;;
-					"closed")
-						pr_emoji="❌"
-						;;
-					*)
-						pr_emoji=""
-						;;
+					"closed") pr_emoji="X" ;;
+					*) pr_emoji="" ;;
 					esac
 
 					pr_display="${pr_emoji} [${pr_number}](${pr_url})"
@@ -792,20 +594,6 @@ if [ $FOUND_COUNT -gt 0 ]; then
 	done
 
 	ISSUE_BODY+="---
-
-## PR Status Legend
-
-| Symbol | Meaning |
-|--------|---------|
-| ✅ | PR merged successfully |
-| ✅ 🔄 | PR open and up to date |
-| ⚠️ 🔄 | PR open but needs rebase (behind base branch) |
-| 🔥 🔄 | PR open with merge conflicts |
-| 🔄 | PR open (status unknown) |
-| ❌ | PR closed without merging |
-| — | No PR found |
-
----
 
 ## What to Do
 
@@ -845,9 +633,9 @@ The \`github.com/golang/mock\` package was **archived in June 2023** and is no l
 
 "
 else
-	ISSUE_BODY+="## ✅ All Clear!
+	ISSUE_BODY+="## All Clear!
 
-All scanned Go repositories are either not using golang/mock or have been updated to the maintained fork. Great work! 🎉
+All scanned Go repositories are either not using golang/mock or have been updated to the maintained fork. Great work!
 
 "
 fi
@@ -856,44 +644,8 @@ ISSUE_BODY+="---
 
 *This issue is automatically updated by the [gomock-lookup.sh](https://github.com/${TRACKING_REPO}/blob/main/scripts/gomock-lookup.sh) script.*"
 
-# Check if tracking issue exists
 echo -e "${BLUE}   Issue body built successfully${RESET}"
-echo -ne "   Checking for existing tracking issue... "
-EXISTING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title,state --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
-
-if [ -n "$EXISTING_ISSUE" ]; then
-	echo -e "${GREEN}found (#${EXISTING_ISSUE})${RESET}"
-	echo -ne "   Updating issue #${EXISTING_ISSUE}... "
-
-	# Check if issue is closed and reopen it if there are repos using deprecated golang/mock
-	ISSUE_STATE=$(gh issue view "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --json state --jq '.state')
-	if [ "$ISSUE_STATE" = "CLOSED" ] && [ $FOUND_COUNT -gt 0 ]; then
-		gh issue reopen "$EXISTING_ISSUE" --repo "$TRACKING_REPO" &>/dev/null
-	fi
-
-	if gh issue edit "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --body "$ISSUE_BODY" &>/dev/null; then
-		echo -e "${GREEN}✓ Updated${RESET}"
-		echo -e "   ${BLUE}View at: https://github.com/${TRACKING_REPO}/issues/${EXISTING_ISSUE}${RESET}"
-	else
-		echo -e "${RED}✗ Failed to update${RESET}"
-	fi
-else
-	echo -e "${YELLOW}not found${RESET}"
-	echo -ne "   Creating new tracking issue... "
-
-	NEW_ISSUE=$(gh issue create --repo "$TRACKING_REPO" --title "$TRACKING_ISSUE_TITLE" --body "$ISSUE_BODY" 2>/dev/null)
-	if [ $? -eq 0 ]; then
-		ISSUE_NUMBER=$(echo "$NEW_ISSUE" | grep -oE '[0-9]+$')
-		echo -e "${GREEN}✓ Created (#${ISSUE_NUMBER})${RESET}"
-		echo -e "   ${BLUE}View at: ${NEW_ISSUE}${RESET}"
-	else
-		echo -e "${RED}✗ Failed to create${RESET}"
-	fi
-fi
+upsert_tracking_issue "$TRACKING_ISSUE_TITLE" "$ISSUE_BODY" "$FOUND_COUNT"
 
 echo
-
-# Cleanup temporary files
-rm -f "$ORG_DATA_FILE"
-
-echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"
+echo -e "${GREEN}${BOLD}Scan completed successfully!${RESET}"

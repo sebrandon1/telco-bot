@@ -57,13 +57,12 @@
 #   - Requires public access to go.mod files or appropriate permissions
 #===============================================================================
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
+# Get script directory for relative paths (must be set BEFORE sourcing common.sh)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source shared library
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
 
 #===============================================================================
 # HELP MENU
@@ -167,26 +166,9 @@ if [ "$INTERACTIVE" = "true" ] && [ "$CREATE_ISSUES" != "true" ]; then
 	CREATE_ISSUES=true
 fi
 
-# Check if GitHub CLI is installed
-echo "🔧 Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "${RED}❌ ERROR: GitHub CLI (gh) is not installed!${RESET}"
-	echo -e "${YELLOW}💡 Please install it first:${RESET}"
-	echo -e "${YELLOW}   macOS: brew install gh${RESET}"
-	echo -e "${YELLOW}   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md${RESET}"
-	echo -e "${YELLOW}   Or visit: https://cli.github.com/${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}✅ GitHub CLI is installed${RESET}"
-
-# Check if GitHub CLI is logged in
-echo "🔒 Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "${RED}❌ ERROR: GitHub CLI is not logged in!${RESET}"
-	echo -e "${YELLOW}💡 Please run 'gh auth login' to authenticate first.${RESET}"
-	exit 1
-fi
-echo -e "${GREEN}✅ GitHub CLI authenticated successfully${RESET}"
+# Check prerequisites
+require_tool gh curl
+check_gh_auth
 
 # Debug: Show token scopes (helps diagnose permission issues)
 if [ "$CREATE_ISSUES" = "true" ]; then
@@ -226,11 +208,11 @@ if [ "$CREATE_ISSUES" = "true" ]; then
 fi
 echo
 
-# List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift-eng" "crc-org")
-# ORGS=("openshift-kni")
+# Use shared defaults from common.sh
+ORGS=("${DEFAULT_ORGS[@]}")
+LIMIT="$DEFAULT_LIMIT"
+INACTIVITY_DAYS=180
 
-LIMIT=1000
 FOUND_COUNT=0
 TOTAL_REPOS=0
 SKIPPED_FORKS=0
@@ -241,25 +223,20 @@ ISSUES_UPDATED=0
 ISSUES_CLOSED=0
 ISSUES_REOPENED=0
 
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Shared cache files (used by all lookup scripts)
-CACHE_DIR="$SCRIPT_DIR/caches"
-FORK_CACHE="$CACHE_DIR/forks.txt"
-NOGOMOD_CACHE="$CACHE_DIR/no-gomod.txt"
-ABANDONED_CACHE="$CACHE_DIR/abandoned.txt"
+# Initialize shared cache paths and load caches
+init_cache_paths
 XCRYPTO_ISSUE_BLOCKLIST="$CACHE_DIR/xcrypto-issue-blocklist.txt"
 OUTPUT_MD="xcrypto-usage-report.md"
 
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
+load_shared_caches
 
-# Inactivity threshold (in days)
-INACTIVITY_DAYS=180 # 6 months
+# Calculate cutoff date for abandoned repo detection
+CUTOFF_DATE=$(calculate_cutoff_date "$INACTIVITY_DAYS")
 
-# Create empty cache files if they don't exist
-touch "$FORK_CACHE" "$NOGOMOD_CACHE" "$ABANDONED_CACHE"
+# Temporary files (cleaned up on exit)
+NOGOMOD_TEMP=$(mktemp)
+ORG_DATA_FILE=$(mktemp)
+trap 'rm -f "$NOGOMOD_TEMP" "$ORG_DATA_FILE" "${ORG_DATA_FILE}.table"' EXIT
 
 #===============================================================================
 # HELPER FUNCTIONS
@@ -299,36 +276,6 @@ confirm_action() {
 		return 1
 		;;
 	esac
-}
-
-# Helper function to check if repo is in cache
-is_in_cache() {
-	local repo="$1"
-	local cache_file="$2"
-	grep -Fxq "$repo" "$cache_file" 2>/dev/null
-}
-
-# Helper function to check if repo is abandoned (no commits in last 6 months)
-is_repo_abandoned() {
-	local repo="$1"
-	local branch="$2"
-
-	# Fetch last commit date from default branch
-	local last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null)
-
-	if [[ $? -ne 0 || -z "$last_commit" ]]; then
-		# Unable to fetch commit date, don't mark as abandoned
-		return 1
-	fi
-
-	# Compare dates
-	if [ "$last_commit" \< "$CUTOFF_DATE" ]; then
-		# Repo is abandoned
-		return 0
-	else
-		# Repo is active
-		return 1
-	fi
 }
 
 # Helper function to extract x/crypto version from go.mod content
@@ -1043,48 +990,6 @@ manage_repo_issue() {
 }
 
 #===============================================================================
-# LOAD CACHES
-#===============================================================================
-
-# Load fork cache info if it exists
-FORK_COUNT_LOADED=0
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	FORK_COUNT_LOADED=$(wc -l <"$FORK_CACHE" | tr -d ' ')
-	echo "📋 Loading fork cache from $FORK_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${FORK_COUNT_LOADED} fork repositories to skip${RESET}"
-	echo
-fi
-
-# Load no-go.mod cache info if it exists
-NOGOMOD_COUNT_LOADED=0
-if [ -f "$NOGOMOD_CACHE" ] && [ -s "$NOGOMOD_CACHE" ]; then
-	NOGOMOD_COUNT_LOADED=$(wc -l <"$NOGOMOD_CACHE" | tr -d ' ')
-	echo "📋 Loading no-go.mod cache from $NOGOMOD_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${NOGOMOD_COUNT_LOADED} repositories without go.mod to skip${RESET}"
-	echo
-fi
-
-# Load abandoned repo cache info if it exists
-ABANDONED_COUNT_LOADED=0
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	ABANDONED_COUNT_LOADED=$(wc -l <"$ABANDONED_CACHE" | tr -d ' ')
-	echo "📋 Loading abandoned repo cache from $ABANDONED_CACHE..."
-	echo -e "${GREEN}✓ Loaded ${ABANDONED_COUNT_LOADED} abandoned repositories to skip${RESET}"
-	echo
-fi
-
-# Calculate cutoff date (6 months ago)
-CUTOFF_DATE=$(date -u -v-${INACTIVITY_DAYS}d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${INACTIVITY_DAYS} days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
-
-if [ -z "$CUTOFF_DATE" ]; then
-	echo -e "${RED}❌ ERROR: Unable to calculate cutoff date${RESET}" >&2
-	exit 1
-fi
-
-# Temporary file to track newly discovered no-go.mod repos
-NOGOMOD_TEMP=$(mktemp)
-
-#===============================================================================
 # FETCH LATEST XCRYPTO VERSION
 #===============================================================================
 
@@ -1099,7 +1004,6 @@ fi
 echo
 
 # Tracking issue configuration
-TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking golang.org/x/crypto Direct Usage"
 
 # Look up the central tracking issue number (needed for --create-issues to link back)
@@ -1125,9 +1029,6 @@ fi
 
 # Array to store repositories using x/crypto directly
 declare -a XCRYPTO_REPOS
-
-# Temporary file to store org-specific data for tracking issue (with last commit date and Dependabot status)
-ORG_DATA_FILE=$(mktemp)
 
 echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR GOLANG.ORG/X/CRYPTO USAGE${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
@@ -1284,14 +1185,11 @@ if [ -f "$REPO_LIST_FILE" ]; then
 	# Use a separate file to store results
 	temp_results=$(mktemp)
 
-	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
-		# Skip empty lines and comments (# or //)
-		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
+	while IFS= read -r repo_line; do
+		# normalize_repo handles stripping URLs and whitespace
+		repo=$(normalize_repo "$repo_line")
 
-		# Normalize repo format: extract owner/repo from various formats
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
-
-		# Skip if still empty after normalization
+		# Skip if empty after normalization
 		[[ -z "$repo" ]] && continue
 
 		INDIVIDUAL_COUNT=$((INDIVIDUAL_COUNT + 1))
@@ -1391,7 +1289,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		else
 			echo -e "${RED}✗ NO direct usage${RESET}"
 		fi
-	done <"$REPO_LIST_FILE"
+	done < <(read_repo_list "$REPO_LIST_FILE")
 
 	# Count the results
 	if [ -f "$temp_results" ] && [ -s "$temp_results" ]; then
@@ -1412,25 +1310,12 @@ if [ -f "$REPO_LIST_FILE" ]; then
 	echo
 fi
 
-# Update no-go.mod cache
-if [ -f "$NOGOMOD_TEMP" ] && [ -s "$NOGOMOD_TEMP" ]; then
-	cat "$NOGOMOD_TEMP" >>"$NOGOMOD_CACHE"
-	sort -u "$NOGOMOD_CACHE" -o "$NOGOMOD_CACHE"
-	NEW_NOGOMOD=$(wc -l <"$NOGOMOD_TEMP" | tr -d ' ')
-	echo -e "${BLUE}💾 Updated no-go.mod cache with ${NEW_NOGOMOD} new entries${RESET}"
-	echo
-fi
-rm -f "$NOGOMOD_TEMP"
+# Update no-go.mod cache using merge_cache
+merge_cache "$NOGOMOD_TEMP" "$NOGOMOD_CACHE" "no-go.mod"
 
-# Sort and deduplicate fork cache
-if [ -f "$FORK_CACHE" ] && [ -s "$FORK_CACHE" ]; then
-	sort -u "$FORK_CACHE" -o "$FORK_CACHE"
-fi
-
-# Sort and deduplicate abandoned cache
-if [ -f "$ABANDONED_CACHE" ] && [ -s "$ABANDONED_CACHE" ]; then
-	sort -u "$ABANDONED_CACHE" -o "$ABANDONED_CACHE"
-fi
+# Deduplicate fork and abandoned caches
+dedup_cache "$FORK_CACHE"
+dedup_cache "$ABANDONED_CACHE"
 
 # Final summary
 echo -e "${BOLD}${BLUE}📈 FINAL RESULTS:${RESET}"
@@ -1653,8 +1538,8 @@ fi
 
 ISSUE_BODY="# golang.org/x/crypto Direct Usage Report
 
-**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-**Package:** [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto)  
+**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+**Package:** [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto)
 ${LATEST_VERSION_INFO}
 **Status:** Actively maintained by the Go team
 
@@ -1715,8 +1600,7 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				repo_display=$(echo "$repo_name" | sed 's/|/\\|/g')
 				# Format the date nicely (from ISO8601 to readable format)
 				if [ "$last_commit" != "unknown" ]; then
-					# Try macOS date format first, then Linux, then fall back to raw
-					last_commit_display=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_commit" "+%Y-%m-%d" 2>/dev/null || date -d "$last_commit" "+%Y-%m-%d" 2>/dev/null || echo "${last_commit:0:10}")
+					last_commit_display=$(format_date "$last_commit")
 				else
 					last_commit_display="Unknown"
 				fi
@@ -1817,40 +1701,9 @@ ISSUE_BODY+="---
 
 *This issue is automatically updated by the [xcrypto-lookup.sh](https://github.com/${TRACKING_REPO}/blob/main/scripts/xcrypto-lookup.sh) script.*"
 
-# Check if tracking issue exists
+# Upsert the central tracking issue
 echo -e "${BLUE}   Issue body built successfully${RESET}"
-echo -ne "   Checking for existing tracking issue... "
-EXISTING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title,state --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
-
-if [ -n "$EXISTING_ISSUE" ]; then
-	echo -e "${GREEN}found (#${EXISTING_ISSUE})${RESET}"
-	echo -ne "   Updating issue #${EXISTING_ISSUE}... "
-
-	# Check if issue is closed and reopen it if there are repos using x/crypto directly
-	ISSUE_STATE=$(gh issue view "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --json state --jq '.state')
-	if [ "$ISSUE_STATE" = "CLOSED" ] && [ $FOUND_COUNT -gt 0 ]; then
-		gh issue reopen "$EXISTING_ISSUE" --repo "$TRACKING_REPO" &>/dev/null
-	fi
-
-	if gh issue edit "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --body "$ISSUE_BODY" &>/dev/null; then
-		echo -e "${GREEN}✓ Updated${RESET}"
-		echo -e "   ${BLUE}View at: https://github.com/${TRACKING_REPO}/issues/${EXISTING_ISSUE}${RESET}"
-	else
-		echo -e "${RED}✗ Failed to update${RESET}"
-	fi
-else
-	echo -e "${YELLOW}not found${RESET}"
-	echo -ne "   Creating new tracking issue... "
-
-	NEW_ISSUE=$(gh issue create --repo "$TRACKING_REPO" --title "$TRACKING_ISSUE_TITLE" --body "$ISSUE_BODY" 2>/dev/null)
-	if [ $? -eq 0 ]; then
-		ISSUE_NUMBER=$(echo "$NEW_ISSUE" | grep -oE '[0-9]+$')
-		echo -e "${GREEN}✓ Created (#${ISSUE_NUMBER})${RESET}"
-		echo -e "   ${BLUE}View at: ${NEW_ISSUE}${RESET}"
-	else
-		echo -e "${RED}✗ Failed to create${RESET}"
-	fi
-fi
+upsert_tracking_issue "$TRACKING_ISSUE_TITLE" "$ISSUE_BODY" "$FOUND_COUNT"
 
 echo
 
@@ -1867,8 +1720,9 @@ if [ -f "$ORG_DATA_FILE" ]; then
 	done <"$ORG_DATA_FILE"
 fi
 
-# Get the tracking issue number (either existing or newly created)
-TRACKING_ISSUE_NUMBER="${EXISTING_ISSUE:-$ISSUE_NUMBER}"
+# Get the tracking issue URL for Slack notification
+# upsert_tracking_issue may have created or found the issue; look it up
+TRACKING_ISSUE_NUMBER=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" 2>/dev/null | head -1)
 TRACKING_ISSUE_URL="https://github.com/${TRACKING_REPO}/issues/${TRACKING_ISSUE_NUMBER}"
 
 # Send Slack notification if XCRYPTO_SLACK_WEBHOOK is set
@@ -1876,8 +1730,5 @@ TRACKING_ISSUE_URL="https://github.com/${TRACKING_REPO}/issues/${TRACKING_ISSUE_
 if [ -n "$XCRYPTO_SLACK_WEBHOOK" ]; then
 	"$SCRIPT_DIR/xcrypto-slack.sh" "$TOTAL_REPOS" "${#ORGS[@]}" "$OUTDATED_COUNT" "$FOUND_COUNT" "$TRACKING_ISSUE_URL"
 fi
-
-# Cleanup temporary files
-rm -f "$ORG_DATA_FILE"
 
 echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"

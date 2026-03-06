@@ -41,36 +41,24 @@ set -e
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CACHE_DIR="$SCRIPT_DIR/caches"
+
+# Source shared library
+source "$SCRIPT_DIR/lib/common.sh"
+
+# Initialize cache paths (sets CACHE_DIR, FORK_CACHE, ABANDONED_CACHE, NOGOMOD_CACHE)
+init_cache_paths
 
 # Check for help flag first
 for arg in "$@"; do
 	if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
-		awk '/^#=====/ { if (++count == 3) exit; next } count == 2 && /^#/ { sub(/^# ?/, ""); print }' "$0"
+		show_help_from_header "$0"
 		exit 0
 	fi
 done
 
-# Check if GitHub CLI is installed
-if ! command -v gh &>/dev/null; then
-	echo "❌ ERROR: GitHub CLI (gh) is not installed!" >&2
-	echo "💡 Please install it first: https://cli.github.com/" >&2
-	exit 1
-fi
-
-# Check if GitHub CLI is logged in
-if ! gh auth status &>/dev/null; then
-	echo "❌ ERROR: GitHub CLI is not logged in!" >&2
-	echo "💡 Please run 'gh auth login' to authenticate first." >&2
-	exit 1
-fi
-
-# Check if jq is installed
-if ! command -v jq &>/dev/null; then
-	echo "❌ ERROR: jq is not installed!" >&2
-	echo "💡 Please install jq for JSON processing." >&2
-	exit 1
-fi
+# Check prerequisites
+require_tool gh jq
+check_gh_auth
 
 # Parse command line arguments
 CREATE_PR=false
@@ -99,20 +87,9 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
 # Configuration
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
-LIMIT=1000
-
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
+ORGS=("${DEFAULT_ORGS[@]}")
+LIMIT=$DEFAULT_LIMIT
 
 # Temporary files
 TEMP_FORKS=$(mktemp)
@@ -126,12 +103,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Calculate cutoff date
-CUTOFF_DATE=$(date -u -v-${INACTIVITY_DAYS}d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${INACTIVITY_DAYS} days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
-
-if [ -z "$CUTOFF_DATE" ]; then
-	echo -e "${RED}❌ ERROR: Unable to calculate cutoff date${RESET}" >&2
-	exit 1
-fi
+CUTOFF_DATE=$(calculate_cutoff_date "$INACTIVITY_DAYS")
 
 echo -e "${BLUE}${BOLD}🔄 UPDATING SHARED CACHES${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
@@ -240,24 +212,24 @@ FORKS_CHANGED=false
 ABANDONED_CHANGED=false
 NOGOMOD_CHANGED=false
 
-if [ -f "$CACHE_DIR/forks.txt" ]; then
-	if ! diff -q "${TEMP_FORKS}.sorted" "$CACHE_DIR/forks.txt" >/dev/null 2>&1; then
+if [ -f "$FORK_CACHE" ]; then
+	if ! diff -q "${TEMP_FORKS}.sorted" "$FORK_CACHE" >/dev/null 2>&1; then
 		FORKS_CHANGED=true
 	fi
 else
 	FORKS_CHANGED=true
 fi
 
-if [ -f "$CACHE_DIR/abandoned.txt" ]; then
-	if ! diff -q "${TEMP_ABANDONED}.sorted" "$CACHE_DIR/abandoned.txt" >/dev/null 2>&1; then
+if [ -f "$ABANDONED_CACHE" ]; then
+	if ! diff -q "${TEMP_ABANDONED}.sorted" "$ABANDONED_CACHE" >/dev/null 2>&1; then
 		ABANDONED_CHANGED=true
 	fi
 else
 	ABANDONED_CHANGED=true
 fi
 
-if [ -f "$CACHE_DIR/no-gomod.txt" ]; then
-	if ! diff -q "${TEMP_NOGOMOD}.sorted" "$CACHE_DIR/no-gomod.txt" >/dev/null 2>&1; then
+if [ -f "$NOGOMOD_CACHE" ]; then
+	if ! diff -q "${TEMP_NOGOMOD}.sorted" "$NOGOMOD_CACHE" >/dev/null 2>&1; then
 		NOGOMOD_CHANGED=true
 	fi
 else
@@ -268,8 +240,8 @@ fi
 echo -e "${BLUE}${BOLD}🔍 CACHE CHANGES:${RESET}"
 
 if [ "$FORKS_CHANGED" = true ]; then
-	if [ -f "$CACHE_DIR/forks.txt" ]; then
-		OLD_COUNT=$(wc -l <"$CACHE_DIR/forks.txt" | tr -d ' ')
+	if [ -f "$FORK_CACHE" ]; then
+		OLD_COUNT=$(wc -l <"$FORK_CACHE" | tr -d ' ')
 		NEW_COUNT=$(wc -l <"${TEMP_FORKS}.sorted" | tr -d ' ')
 		echo -e "   ${YELLOW}forks.txt:${RESET} changed (${OLD_COUNT} → ${NEW_COUNT})"
 	else
@@ -281,8 +253,8 @@ else
 fi
 
 if [ "$ABANDONED_CHANGED" = true ]; then
-	if [ -f "$CACHE_DIR/abandoned.txt" ]; then
-		OLD_COUNT=$(wc -l <"$CACHE_DIR/abandoned.txt" | tr -d ' ')
+	if [ -f "$ABANDONED_CACHE" ]; then
+		OLD_COUNT=$(wc -l <"$ABANDONED_CACHE" | tr -d ' ')
 		NEW_COUNT=$(wc -l <"${TEMP_ABANDONED}.sorted" | tr -d ' ')
 		echo -e "   ${YELLOW}abandoned.txt:${RESET} changed (${OLD_COUNT} → ${NEW_COUNT})"
 	else
@@ -294,8 +266,8 @@ else
 fi
 
 if [ "$NOGOMOD_CHANGED" = true ]; then
-	if [ -f "$CACHE_DIR/no-gomod.txt" ]; then
-		OLD_COUNT=$(wc -l <"$CACHE_DIR/no-gomod.txt" | tr -d ' ')
+	if [ -f "$NOGOMOD_CACHE" ]; then
+		OLD_COUNT=$(wc -l <"$NOGOMOD_CACHE" | tr -d ' ')
 		NEW_COUNT=$(wc -l <"${TEMP_NOGOMOD}.sorted" | tr -d ' ')
 		echo -e "   ${YELLOW}no-gomod.txt:${RESET} changed (${OLD_COUNT} → ${NEW_COUNT})"
 	else
@@ -338,17 +310,17 @@ fi
 echo -e "${BLUE}${BOLD}💾 Updating cache files...${RESET}"
 
 if [ "$FORKS_CHANGED" = true ]; then
-	cp "${TEMP_FORKS}.sorted" "$CACHE_DIR/forks.txt"
+	cp "${TEMP_FORKS}.sorted" "$FORK_CACHE"
 	echo -e "   ${GREEN}✓ Updated forks.txt${RESET}"
 fi
 
 if [ "$ABANDONED_CHANGED" = true ]; then
-	cp "${TEMP_ABANDONED}.sorted" "$CACHE_DIR/abandoned.txt"
+	cp "${TEMP_ABANDONED}.sorted" "$ABANDONED_CACHE"
 	echo -e "   ${GREEN}✓ Updated abandoned.txt${RESET}"
 fi
 
 if [ "$NOGOMOD_CHANGED" = true ]; then
-	cp "${TEMP_NOGOMOD}.sorted" "$CACHE_DIR/no-gomod.txt"
+	cp "${TEMP_NOGOMOD}.sorted" "$NOGOMOD_CACHE"
 	echo -e "   ${GREEN}✓ Updated no-gomod.txt${RESET}"
 fi
 

@@ -74,46 +74,21 @@
 #   - GolangCI-lint releases: https://github.com/golangci/golangci-lint/releases
 #===============================================================================
 
+# Set SCRIPT_DIR before sourcing the shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+
 # Check for help flag first (before any other checks)
 for arg in "$@"; do
 	if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
-		awk '/^#=====/ { if (++count == 3) exit; next } count == 2 && /^#/ { sub(/^# ?/, ""); print }' "$0"
+		show_help_from_header "$0"
 		exit 0
 	fi
 done
 
-# Check if GitHub CLI is installed
-echo "🔧 Checking GitHub CLI installation..."
-if ! command -v gh &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI (gh) is not installed!\033[0m"
-	echo -e "\033[0;33m💡 Please install it first:\033[0m"
-	echo -e "\033[0;33m   macOS: brew install gh\033[0m"
-	echo -e "\033[0;33m   Linux: https://github.com/cli/cli/blob/trunk/docs/install_linux.md\033[0m"
-	echo -e "\033[0;33m   Or visit: https://cli.github.com/\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI is installed\033[0m"
-
-# Check if GitHub CLI is logged in
-echo "🔒 Checking GitHub CLI authentication..."
-if ! gh auth status &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: GitHub CLI is not logged in!\033[0m"
-	echo -e "\033[0;33m💡 Please run 'gh auth login' to authenticate first.\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ GitHub CLI authenticated successfully\033[0m"
-
-# Check if jq is installed
-echo "🔧 Checking jq installation..."
-if ! command -v jq &>/dev/null; then
-	echo -e "\033[0;31m❌ ERROR: jq is not installed!\033[0m"
-	echo -e "\033[0;33m💡 Please install it first:\033[0m"
-	echo -e "\033[0;33m   macOS: brew install jq\033[0m"
-	echo -e "\033[0;33m   Linux: sudo apt-get install jq (Debian/Ubuntu)\033[0m"
-	echo -e "\033[0;33m   Or visit: https://stedolan.github.io/jq/\033[0m"
-	exit 1
-fi
-echo -e "\033[0;32m✅ jq is installed\033[0m"
+# Check prerequisites
+require_tool gh jq curl
+check_gh_auth
 echo
 
 # Parse command line arguments
@@ -135,7 +110,7 @@ for arg in "$@"; do
 		shift
 		;;
 	*)
-		echo -e "\033[0;31m❌ ERROR: Unknown option: $arg\033[0m"
+		echo -e "${RED}ERROR: Unknown option: $arg${RESET}"
 		echo "Use --help or -h for usage information"
 		exit 1
 		;;
@@ -143,9 +118,9 @@ for arg in "$@"; do
 done
 
 # List of orgs to scan
-ORGS=("redhat-best-practices-for-k8s" "openshift-kni" "redhat-openshift-ecosystem" "redhatci" "openshift" "openshift-eng" "crc-org")
+ORGS=("${DEFAULT_ORGS[@]}")
 
-LIMIT=1000
+LIMIT=$DEFAULT_LIMIT
 OUTDATED_COUNT=0
 TOTAL_GO_REPOS=0
 TOTAL_REPOS=0
@@ -153,68 +128,29 @@ SKIPPED_FORKS=0
 SKIPPED_NOGOMOD=0
 SKIPPED_ABANDONED=0
 
-# Terminal colors
-GREEN="\033[0;32m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-YELLOW="\033[0;33m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
 # Tracking issue configuration
-TRACKING_REPO="redhat-best-practices-for-k8s/telco-bot"
 TRACKING_ISSUE_TITLE="Tracking Outdated GolangCI-Lint Versions"
 
-# Get script directory for relative paths
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Initialize shared cache paths (sets FORK_CACHE, NOGOMOD_CACHE, ABANDONED_CACHE)
+init_cache_paths
 
-# Shared cache files (used by all lookup scripts)
-CACHE_DIR="$SCRIPT_DIR/caches"
-CACHE_FILE="$CACHE_DIR/no-gomod.txt"
-FORK_CACHE_FILE="$CACHE_DIR/forks.txt"
-ABANDONED_CACHE_FILE="$CACHE_DIR/abandoned.txt"
 OUTPUT_MD="golangci-lint-report.md"
 
-# Ensure cache directory exists
-mkdir -p "$CACHE_DIR"
-
 # Inactivity threshold (in days)
-INACTIVITY_DAYS=180 # 6 months
+INACTIVITY_DAYS=$DEFAULT_INACTIVITY_DAYS
 
 # Clear cache if requested
 if [ "$CLEAR_CACHE" = true ]; then
-	echo -e "${YELLOW}🗑️  Clearing caches...${RESET}"
-	rm -f "$CACHE_FILE" "$FORK_CACHE_FILE" "$ABANDONED_CACHE_FILE"
-	echo -e "${GREEN}✅ Caches cleared${RESET}"
+	echo -e "${YELLOW}Clearing caches...${RESET}"
+	rm -f "$NOGOMOD_CACHE" "$FORK_CACHE" "$ABANDONED_CACHE"
+	echo -e "${GREEN}Caches cleared${RESET}"
 	echo
+	# Recreate empty cache files after clearing
+	touch "$FORK_CACHE" "$NOGOMOD_CACHE" "$ABANDONED_CACHE"
 fi
 
-# Create empty cache files if they don't exist
-touch "$CACHE_FILE" "$FORK_CACHE_FILE" "$ABANDONED_CACHE_FILE"
-
-# Load cache of non-Go repos
-NON_GO_REPOS=""
-if [ -f "$CACHE_FILE" ] && [ -s "$CACHE_FILE" ]; then
-	NON_GO_REPOS=$(cat "$CACHE_FILE")
-	CACHE_SIZE=$(echo "$NON_GO_REPOS" | wc -l | tr -d ' ')
-	echo -e "${BLUE}📦 Loaded non-Go repo cache: ${CACHE_SIZE} repositories${RESET}"
-fi
-
-# Load cache of fork repos
-FORK_REPOS=""
-if [ -f "$FORK_CACHE_FILE" ] && [ -s "$FORK_CACHE_FILE" ]; then
-	FORK_REPOS=$(cat "$FORK_CACHE_FILE")
-	FORK_CACHE_SIZE=$(echo "$FORK_REPOS" | wc -l | tr -d ' ')
-	echo -e "${BLUE}🍴 Loaded fork cache: ${FORK_CACHE_SIZE} repositories${RESET}"
-fi
-
-# Load cache of abandoned repos
-ABANDONED_REPOS=""
-if [ -f "$ABANDONED_CACHE_FILE" ] && [ -s "$ABANDONED_CACHE_FILE" ]; then
-	ABANDONED_REPOS=$(cat "$ABANDONED_CACHE_FILE")
-	ABANDONED_CACHE_SIZE=$(echo "$ABANDONED_REPOS" | wc -l | tr -d ' ')
-	echo -e "${BLUE}📋 Loaded abandoned repo cache: ${ABANDONED_CACHE_SIZE} repositories${RESET}"
-fi
+# Load and display shared cache counts
+load_shared_caches
 
 # Load blocklist of repos to exclude
 BLOCKLIST_FILE="scripts/golangci-lint-repo-blocklist.txt"
@@ -225,73 +161,41 @@ if [ -f "$BLOCKLIST_FILE" ]; then
 		# Skip empty lines and comments
 		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
 		# Normalize repo format
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+		repo=$(normalize_repo "$repo_input")
 		[[ -z "$repo" ]] && continue
 		BLOCKLIST="${BLOCKLIST}${repo}"$'\n'
 	done <"$BLOCKLIST_FILE"
 	BLOCKLIST_SIZE=$(echo "$BLOCKLIST" | grep -c '^' 2>/dev/null || echo "0")
 	if [ "$BLOCKLIST_SIZE" -gt 0 ]; then
-		echo -e "${YELLOW}🚫 Loaded blocklist: ${BLOCKLIST_SIZE} repositories will be excluded${RESET}"
+		echo -e "${YELLOW}Loaded blocklist: ${BLOCKLIST_SIZE} repositories will be excluded${RESET}"
 	fi
 fi
 
 # Calculate cutoff date (6 months ago)
-CUTOFF_DATE=$(date -u -v-${INACTIVITY_DAYS}d "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "${INACTIVITY_DAYS} days ago" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
-
-if [ -z "$CUTOFF_DATE" ]; then
-	echo -e "${RED}❌ ERROR: Unable to calculate cutoff date${RESET}" >&2
-	exit 1
-fi
+CUTOFF_DATE=$(calculate_cutoff_date "$INACTIVITY_DAYS")
 
 # Temporary files to store results
 OUTDATED_REPOS_FILE=$(mktemp)
 ORG_DATA_FILE=$(mktemp)
-CACHE_UPDATES=$(mktemp)
+NOGOMOD_CACHE_UPDATES=$(mktemp)
 FORK_CACHE_UPDATES=$(mktemp)
 ABANDONED_CACHE_UPDATES=$(mktemp)
 
+# Cleanup temp files on exit
+trap 'rm -f "$OUTDATED_REPOS_FILE" "$ORG_DATA_FILE" "$NOGOMOD_CACHE_UPDATES" "$FORK_CACHE_UPDATES" "$ABANDONED_CACHE_UPDATES"' EXIT
+
 # Fetch latest golangci-lint version
-echo -e "${BLUE}${BOLD}📡 Fetching latest golangci-lint version from GitHub${RESET}"
+echo -e "${BLUE}${BOLD}Fetching latest golangci-lint version from GitHub${RESET}"
 echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 
 LATEST_VERSION=$(gh api repos/golangci/golangci-lint/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//')
 if [[ $? -ne 0 || -z "$LATEST_VERSION" ]]; then
-	echo -e "${RED}❌ ERROR: Failed to fetch latest golangci-lint version${RESET}"
+	echo -e "${RED}ERROR: Failed to fetch latest golangci-lint version${RESET}"
 	exit 1
 fi
 
-echo -e "${GREEN}✅ Latest golangci-lint version: v${LATEST_VERSION}${RESET}"
+echo -e "${GREEN}Latest golangci-lint version: v${LATEST_VERSION}${RESET}"
 echo
-
-# Helper function to check if repo is in cache
-is_in_cache() {
-	local repo="$1"
-	local cache_file="$2"
-	grep -Fxq "$repo" "$cache_file" 2>/dev/null
-}
-
-# Helper function to check if repo is abandoned (no commits in last 6 months)
-is_repo_abandoned() {
-	local repo="$1"
-	local branch="$2"
-
-	# Fetch last commit date from default branch
-	local last_commit=$(gh api "repos/${repo}/commits/${branch}" --jq '.commit.committer.date' 2>/dev/null)
-
-	if [[ $? -ne 0 || -z "$last_commit" ]]; then
-		# Unable to fetch commit date, don't mark as abandoned
-		return 1
-	fi
-
-	# Compare dates
-	if [ "$last_commit" \< "$CUTOFF_DATE" ]; then
-		# Repo is abandoned
-		return 0
-	else
-		# Repo is active
-		return 1
-	fi
-}
 
 # Function to compare two versions (returns 0 if v1 < v2, 1 if v1 >= v2)
 # Versions should be in format like "1.55.2" (without 'v' prefix)
@@ -385,14 +289,14 @@ extract_golangci_lint_version() {
 	return 1
 }
 
-echo -e "${BLUE}${BOLD}🔍 SCANNING REPOSITORIES FOR OUTDATED GOLANGCI-LINT VERSIONS${RESET}"
+echo -e "${BLUE}${BOLD}SCANNING REPOSITORIES FOR OUTDATED GOLANGCI-LINT VERSIONS${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
-echo -e "${BLUE}📅 Skipping repos with no commits since: ${CUTOFF_DATE:0:10}${RESET}"
+echo -e "${BLUE}Skipping repos with no commits since: ${CUTOFF_DATE:0:10}${RESET}"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════${RESET}"
 echo
 
 for ORG_NAME in "${ORGS[@]}"; do
-	echo -e "${YELLOW}${BOLD}👉 Organization: ${ORG_NAME}${RESET}"
+	echo -e "${YELLOW}${BOLD}Organization: ${ORG_NAME}${RESET}"
 
 	# Get all repos first (including fork status)
 	echo -e "${BLUE}   Fetching repository list...${RESET}"
@@ -412,18 +316,18 @@ for ORG_NAME in "${ORGS[@]}"; do
 		[[ -z "$repo" ]] && continue
 
 		# Show a simple progress indicator
-		echo -ne "   📂 ${repo} on branch ${branch}... "
+		echo -ne "   ${repo} on branch ${branch}... "
 
 		# Check fork cache first
-		if is_in_cache "$repo" "$FORK_CACHE_FILE"; then
-			echo -e "${BLUE}⏩ skipped (fork - cached)${RESET}"
+		if is_in_cache "$repo" "$FORK_CACHE"; then
+			echo -e "${BLUE}skipped (fork - cached)${RESET}"
 			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
 			continue
 		fi
 
 		# Skip forks detected from API
 		if [ "$is_fork" = "true" ]; then
-			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
+			echo -e "${BLUE}skipped (fork)${RESET}"
 			echo "$repo" >>"$FORK_CACHE_UPDATES"
 			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
 			continue
@@ -431,28 +335,28 @@ for ORG_NAME in "${ORGS[@]}"; do
 
 		# Check blocklist
 		if [ -n "$BLOCKLIST" ] && echo "$BLOCKLIST" | grep -q "^${repo}$"; then
-			echo -e "${YELLOW}⏩ skipped (blocklisted)${RESET}"
+			echo -e "${YELLOW}skipped (blocklisted)${RESET}"
 			continue
 		fi
 
 		# Check abandoned cache
-		if is_in_cache "$repo" "$ABANDONED_CACHE_FILE"; then
-			echo -e "${BLUE}⏩ skipped (abandoned - cached)${RESET}"
+		if is_in_cache "$repo" "$ABANDONED_CACHE"; then
+			echo -e "${BLUE}skipped (abandoned - cached)${RESET}"
 			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
 			continue
 		fi
 
 		# Check if repo is abandoned
 		if is_repo_abandoned "$repo" "$branch"; then
-			echo -e "${BLUE}⏩ skipped (abandoned - no recent commits)${RESET}"
+			echo -e "${BLUE}skipped (abandoned - no recent commits)${RESET}"
 			echo "$repo" >>"$ABANDONED_CACHE_UPDATES"
 			SKIPPED_ABANDONED=$((SKIPPED_ABANDONED + 1))
 			continue
 		fi
 
 		# Check non-Go cache
-		if is_in_cache "$repo" "$CACHE_FILE"; then
-			echo -e "${YELLOW}⏩ no go.mod (cached)${RESET}"
+		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
+			echo -e "${YELLOW}no go.mod (cached)${RESET}"
 			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
 			continue
 		fi
@@ -463,7 +367,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 
 		if [[ $? -ne 0 ]]; then
 			echo -e "${YELLOW}no go.mod${RESET}"
-			echo "$repo" >>"$CACHE_UPDATES"
+			echo "$repo" >>"$NOGOMOD_CACHE_UPDATES"
 			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
 			continue
 		fi
@@ -475,7 +379,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 		version_info=$(extract_golangci_lint_version "$repo" "$branch")
 
 		if [[ -z "$version_info" ]]; then
-			echo -e "${YELLOW}✓ No golangci-lint detected${RESET}"
+			echo -e "${YELLOW}No golangci-lint detected${RESET}"
 			continue
 		fi
 
@@ -486,7 +390,7 @@ for ORG_NAME in "${ORGS[@]}"; do
 
 		# Compare versions
 		if version_lt "$current_version" "$LATEST_VERSION"; then
-			echo -e "${RED}✗ OUTDATED (v${current_version} in ${source_file})${RESET}"
+			echo -e "${RED}OUTDATED (v${current_version} in ${source_file})${RESET}"
 			ORG_OUTDATED=$((ORG_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
 
@@ -498,13 +402,13 @@ for ORG_NAME in "${ORGS[@]}"; do
 			echo "$ORG_NAME|$repo|$current_version|$LATEST_VERSION|$source_file|$source_type|$branch|$last_commit" >>"$ORG_DATA_FILE"
 			echo "$repo|$current_version|$source_file|$branch" >>"$OUTDATED_REPOS_FILE"
 		else
-			echo -e "${GREEN}✓ Up-to-date (v${current_version})${RESET}"
+			echo -e "${GREEN}Up-to-date (v${current_version})${RESET}"
 		fi
 	done <<<"$REPOS"
 
 	# Summary for this organization
 	echo
-	echo -e "${YELLOW}${BOLD}📊 Summary for ${ORG_NAME}:${RESET}"
+	echo -e "${YELLOW}${BOLD}Summary for ${ORG_NAME}:${RESET}"
 	echo -e "   ${BLUE}Go repositories found:${RESET} ${ORG_GO_REPOS}"
 	echo -e "   ${RED}Repositories with outdated golangci-lint:${RESET} ${ORG_OUTDATED}"
 	if [ $ORG_GO_REPOS -gt 0 ]; then
@@ -518,32 +422,27 @@ done
 # Scan individual repositories from golangci-lint-repo-list.txt if it exists
 REPO_LIST_FILE="scripts/golangci-lint-repo-list.txt"
 if [ -f "$REPO_LIST_FILE" ]; then
-	echo -e "${YELLOW}${BOLD}👉 Individual Repositories from ${REPO_LIST_FILE}${RESET}"
+	echo -e "${YELLOW}${BOLD}Individual Repositories from ${REPO_LIST_FILE}${RESET}"
 
 	# Track results for individual repos
 	INDIVIDUAL_OUTDATED=0
 	INDIVIDUAL_GO_REPOS=0
 
-	while IFS= read -r repo_input || [ -n "$repo_input" ]; do
-		# Skip empty lines and comments
-		[[ -z "$repo_input" || "$repo_input" =~ ^[[:space:]]*(#|//) ]] && continue
-
-		# Normalize repo format
-		repo=$(echo "$repo_input" | sed -e 's|https://github.com/||' -e 's|github.com/||' -e 's|^[[:space:]]*||' -e 's|[[:space:]]*$||')
+	while IFS= read -r repo; do
 		[[ -z "$repo" ]] && continue
 
-		echo -ne "   📂 ${repo}... "
+		echo -ne "   ${repo}... "
 
 		# Check fork cache
-		if is_in_cache "$repo" "$FORK_CACHE_FILE"; then
-			echo -e "${BLUE}⏩ skipped (fork - cached)${RESET}"
+		if is_in_cache "$repo" "$FORK_CACHE"; then
+			echo -e "${BLUE}skipped (fork - cached)${RESET}"
 			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
 			continue
 		fi
 
 		# Check non-Go cache
-		if is_in_cache "$repo" "$CACHE_FILE"; then
-			echo -e "${YELLOW}⏩ no go.mod (cached)${RESET}"
+		if is_in_cache "$repo" "$NOGOMOD_CACHE"; then
+			echo -e "${YELLOW}no go.mod (cached)${RESET}"
 			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
 			continue
 		fi
@@ -551,7 +450,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		# Get repo info
 		repo_info=$(gh repo view "$repo" --json defaultBranchRef,isFork 2>/dev/null)
 		if [[ $? -ne 0 || -z "$repo_info" ]]; then
-			echo -e "${RED}✗ Failed to fetch repo info${RESET}"
+			echo -e "${RED}Failed to fetch repo info${RESET}"
 			continue
 		fi
 
@@ -560,7 +459,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		# Skip forks
 		if [ "$is_fork" = "true" ]; then
-			echo -e "${BLUE}⏩ skipped (fork)${RESET}"
+			echo -e "${BLUE}skipped (fork)${RESET}"
 			echo "$repo" >>"$FORK_CACHE_UPDATES"
 			SKIPPED_FORKS=$((SKIPPED_FORKS + 1))
 			continue
@@ -568,7 +467,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		# Check blocklist
 		if [ -n "$BLOCKLIST" ] && echo "$BLOCKLIST" | grep -q "^${repo}$"; then
-			echo -e "${YELLOW}⏩ skipped (blocklisted)${RESET}"
+			echo -e "${YELLOW}skipped (blocklisted)${RESET}"
 			continue
 		fi
 
@@ -580,7 +479,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		if [[ $? -ne 0 ]]; then
 			echo -e "${YELLOW}no go.mod${RESET}"
-			echo "$repo" >>"$CACHE_UPDATES"
+			echo "$repo" >>"$NOGOMOD_CACHE_UPDATES"
 			SKIPPED_NOGOMOD=$((SKIPPED_NOGOMOD + 1))
 			continue
 		fi
@@ -592,7 +491,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 		version_info=$(extract_golangci_lint_version "$repo" "$branch")
 
 		if [[ -z "$version_info" ]]; then
-			echo -e "${YELLOW}✓ No golangci-lint detected${RESET}"
+			echo -e "${YELLOW}No golangci-lint detected${RESET}"
 			continue
 		fi
 
@@ -603,7 +502,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 
 		# Compare versions
 		if version_lt "$current_version" "$LATEST_VERSION"; then
-			echo -e "${RED}✗ OUTDATED (v${current_version} in ${source_file})${RESET}"
+			echo -e "${RED}OUTDATED (v${current_version} in ${source_file})${RESET}"
 			INDIVIDUAL_OUTDATED=$((INDIVIDUAL_OUTDATED + 1))
 			OUTDATED_COUNT=$((OUTDATED_COUNT + 1))
 
@@ -614,13 +513,13 @@ if [ -f "$REPO_LIST_FILE" ]; then
 			echo "Individual Repositories|$repo|$current_version|$LATEST_VERSION|$source_file|$source_type|$branch|$last_commit" >>"$ORG_DATA_FILE"
 			echo "$repo|$current_version|$source_file|$branch" >>"$OUTDATED_REPOS_FILE"
 		else
-			echo -e "${GREEN}✓ Up-to-date (v${current_version})${RESET}"
+			echo -e "${GREEN}Up-to-date (v${current_version})${RESET}"
 		fi
-	done <"$REPO_LIST_FILE"
+	done < <(read_repo_list "$REPO_LIST_FILE")
 
 	# Summary for individual repositories
 	echo
-	echo -e "${YELLOW}${BOLD}📊 Summary for Individual Repositories:${RESET}"
+	echo -e "${YELLOW}${BOLD}Summary for Individual Repositories:${RESET}"
 	echo -e "   ${BLUE}Go repositories found:${RESET} ${INDIVIDUAL_GO_REPOS}"
 	echo -e "   ${RED}Repositories with outdated golangci-lint:${RESET} ${INDIVIDUAL_OUTDATED}"
 	if [ $INDIVIDUAL_GO_REPOS -gt 0 ]; then
@@ -632,7 +531,7 @@ if [ -f "$REPO_LIST_FILE" ]; then
 fi
 
 # Final summary
-echo -e "${BOLD}${BLUE}📈 FINAL RESULTS:${RESET}"
+echo -e "${BOLD}${BLUE}FINAL RESULTS:${RESET}"
 echo -e "${BOLD}   Total repositories scanned:${RESET} ${TOTAL_REPOS}"
 echo -e "${BOLD}   Repositories skipped (forks):${RESET} ${BLUE}${SKIPPED_FORKS}${RESET}"
 echo -e "${BOLD}   Repositories skipped (abandoned):${RESET} ${BLUE}${SKIPPED_ABANDONED}${RESET}"
@@ -652,12 +551,12 @@ echo
 
 # Detailed report and markdown generation
 if [ $OUTDATED_COUNT -gt 0 ]; then
-	echo -e "${RED}${BOLD}⚠️  DETAILED REPORT: REPOSITORIES WITH OUTDATED GOLANGCI-LINT${RESET}"
+	echo -e "${RED}${BOLD}DETAILED REPORT: REPOSITORIES WITH OUTDATED GOLANGCI-LINT${RESET}"
 	echo -e "${RED}═══════════════════════════════════════════════════════════${RESET}"
 	echo
 
 	# Generate Markdown report
-	echo "📝 Generating markdown report: $OUTPUT_MD"
+	echo "Generating markdown report: $OUTPUT_MD"
 	{
 		echo "# Outdated GolangCI-Lint Report"
 		echo ""
@@ -729,7 +628,7 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 		echo ""
 	} >"$OUTPUT_MD"
 
-	echo -e "${GREEN}✅ Markdown report saved to: $OUTPUT_MD${RESET}"
+	echo -e "${GREEN}Markdown report saved to: $OUTPUT_MD${RESET}"
 	echo
 
 	# Display summary table
@@ -741,12 +640,12 @@ if [ $OUTDATED_COUNT -gt 0 ]; then
 	done
 
 	echo
-	echo -e "${YELLOW}${BOLD}💡 RECOMMENDATION:${RESET}"
+	echo -e "${YELLOW}${BOLD}RECOMMENDATION:${RESET}"
 	echo -e "${YELLOW}   Update golangci-lint to the latest version (v${LATEST_VERSION})${RESET}"
 	echo -e "${YELLOW}   Reference: https://github.com/golangci/golangci-lint/releases${RESET}"
 	echo
 else
-	echo -e "${GREEN}${BOLD}✅ Great! All Go repositories are using up-to-date golangci-lint versions${RESET}"
+	echo -e "${GREEN}${BOLD}Great! All Go repositories are using up-to-date golangci-lint versions${RESET}"
 	echo
 
 	# Generate empty report
@@ -765,27 +664,27 @@ else
 		echo "- **Repositories with outdated golangci-lint:** ${OUTDATED_COUNT}"
 		echo "- **Latest golangci-lint version:** v${LATEST_VERSION}"
 		echo ""
-		echo "## ✅ Result"
+		echo "## Result"
 		echo ""
 		echo "**Great!** All scanned Go repositories are using up-to-date golangci-lint versions."
 		echo ""
 	} >"$OUTPUT_MD"
 
-	echo "📝 Report saved to: $OUTPUT_MD"
+	echo "Report saved to: $OUTPUT_MD"
 	echo
 fi
 
 # Update tracking issue
 if [ "$UPDATE_TRACKING" = true ]; then
-	echo -e "${BLUE}${BOLD}📋 Updating Central Tracking Issue${RESET}"
+	echo -e "${BLUE}${BOLD}Updating Central Tracking Issue${RESET}"
 	echo -e "${BLUE}─────────────────────────────────────────────────────${RESET}"
 	echo -e "${BLUE}   Building issue body with ${OUTDATED_COUNT} outdated repositories...${RESET}"
 
 	# Build the issue body
 	ISSUE_BODY="# GolangCI-Lint Version Status Report
 
-**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-**Latest GolangCI-Lint Version:** \`v${LATEST_VERSION}\`  
+**Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+**Latest GolangCI-Lint Version:** \`v${LATEST_VERSION}\`
 **Reference:** [GolangCI-Lint Releases](https://github.com/golangci/golangci-lint/releases)
 
 ## Summary
@@ -835,11 +734,7 @@ if [ "$UPDATE_TRACKING" = true ]; then
 					# Escape pipe characters in repo names if any
 					repo_display=$(echo "$repo_name" | sed 's/|/\\|/g')
 					# Format the date nicely
-					if [ "$last_commit" != "unknown" ]; then
-						last_commit_display=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_commit" "+%Y-%m-%d" 2>/dev/null || date -d "$last_commit" "+%Y-%m-%d" 2>/dev/null || echo "${last_commit:0:10}")
-					else
-						last_commit_display="Unknown"
-					fi
+					last_commit_display=$(format_date "$last_commit")
 					echo "| [\`${repo_display}\`](https://github.com/${repo}) | \`v${current}\` | \`v${latest}\` | \`${source}\` | ${last_commit_display} |"
 				done >>"${ORG_DATA_FILE}.table"
 
@@ -893,9 +788,9 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@v${LATEST_VERSION
 
 "
 	else
-		ISSUE_BODY+="## ✅ All Clear!
+		ISSUE_BODY+="## All Clear!
 
-All scanned Go repositories are using up-to-date golangci-lint versions. Great work! 🎉
+All scanned Go repositories are using up-to-date golangci-lint versions. Great work!
 
 "
 	fi
@@ -904,67 +799,16 @@ All scanned Go repositories are using up-to-date golangci-lint versions. Great w
 
 *This issue is automatically updated by the [golangci-lint-checker.sh](https://github.com/${TRACKING_REPO}/blob/main/scripts/golangci-lint-checker.sh) script.*"
 
-	# Check if tracking issue exists
+	# Upsert the tracking issue
 	echo -e "${BLUE}   Issue body built successfully${RESET}"
-	echo -ne "   Checking for existing tracking issue... "
-	EXISTING_ISSUE=$(gh issue list --repo "$TRACKING_REPO" --search "in:title \"${TRACKING_ISSUE_TITLE}\"" --state all --json number,title,state --jq ".[] | select(.title == \"${TRACKING_ISSUE_TITLE}\") | .number" | head -1)
-
-	if [ -n "$EXISTING_ISSUE" ]; then
-		echo -e "${GREEN}found (#${EXISTING_ISSUE})${RESET}"
-		echo -ne "   Updating issue #${EXISTING_ISSUE}... "
-
-		# Check if issue is closed and reopen it if there are outdated repos
-		ISSUE_STATE=$(gh issue view "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --json state --jq '.state')
-		if [ "$ISSUE_STATE" = "CLOSED" ] && [ $OUTDATED_COUNT -gt 0 ]; then
-			gh issue reopen "$EXISTING_ISSUE" --repo "$TRACKING_REPO" &>/dev/null
-		fi
-
-		if gh issue edit "$EXISTING_ISSUE" --repo "$TRACKING_REPO" --body "$ISSUE_BODY" &>/dev/null; then
-			echo -e "${GREEN}✓ Updated${RESET}"
-			echo -e "   ${BLUE}View at: https://github.com/${TRACKING_REPO}/issues/${EXISTING_ISSUE}${RESET}"
-		else
-			echo -e "${RED}✗ Failed to update${RESET}"
-		fi
-	else
-		echo -e "${YELLOW}not found${RESET}"
-		echo -ne "   Creating new tracking issue... "
-
-		NEW_ISSUE=$(gh issue create --repo "$TRACKING_REPO" --title "$TRACKING_ISSUE_TITLE" --body "$ISSUE_BODY" 2>/dev/null)
-		if [ $? -eq 0 ]; then
-			ISSUE_NUMBER=$(echo "$NEW_ISSUE" | grep -oE '[0-9]+$')
-			echo -e "${GREEN}✓ Created (#${ISSUE_NUMBER})${RESET}"
-			echo -e "   ${BLUE}View at: ${NEW_ISSUE}${RESET}"
-		else
-			echo -e "${RED}✗ Failed to create${RESET}"
-		fi
-	fi
+	upsert_tracking_issue "$TRACKING_ISSUE_TITLE" "$ISSUE_BODY" "$OUTDATED_COUNT"
 
 	echo
 fi
 
 # Save updated caches
-if [ -f "$CACHE_UPDATES" ] && [ -s "$CACHE_UPDATES" ]; then
-	cat "$CACHE_UPDATES" "$CACHE_FILE" 2>/dev/null | sort -u >"${CACHE_FILE}.tmp"
-	mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
-	NEW_CACHE_COUNT=$(wc -l <"$CACHE_UPDATES" | tr -d ' ')
-	echo -e "${BLUE}💾 Non-Go repo cache updated: Added ${NEW_CACHE_COUNT} repositories${RESET}"
-fi
+merge_cache "$NOGOMOD_CACHE_UPDATES" "$NOGOMOD_CACHE" "no-go.mod"
+merge_cache "$FORK_CACHE_UPDATES" "$FORK_CACHE" "fork"
+merge_cache "$ABANDONED_CACHE_UPDATES" "$ABANDONED_CACHE" "abandoned"
 
-if [ -f "$FORK_CACHE_UPDATES" ] && [ -s "$FORK_CACHE_UPDATES" ]; then
-	cat "$FORK_CACHE_UPDATES" "$FORK_CACHE_FILE" 2>/dev/null | sort -u >"${FORK_CACHE_FILE}.tmp"
-	mv "${FORK_CACHE_FILE}.tmp" "$FORK_CACHE_FILE"
-	NEW_FORK_COUNT=$(wc -l <"$FORK_CACHE_UPDATES" | tr -d ' ')
-	echo -e "${BLUE}🍴 Fork cache updated: Added ${NEW_FORK_COUNT} repositories${RESET}"
-fi
-
-if [ -f "$ABANDONED_CACHE_UPDATES" ] && [ -s "$ABANDONED_CACHE_UPDATES" ]; then
-	cat "$ABANDONED_CACHE_UPDATES" "$ABANDONED_CACHE_FILE" 2>/dev/null | sort -u >"${ABANDONED_CACHE_FILE}.tmp"
-	mv "${ABANDONED_CACHE_FILE}.tmp" "$ABANDONED_CACHE_FILE"
-	NEW_ABANDONED_COUNT=$(wc -l <"$ABANDONED_CACHE_UPDATES" | tr -d ' ')
-	echo -e "${BLUE}📋 Abandoned repo cache updated: Added ${NEW_ABANDONED_COUNT} repositories${RESET}"
-fi
-
-# Cleanup temporary files
-rm -f "$OUTDATED_REPOS_FILE" "$ORG_DATA_FILE" "$CACHE_UPDATES" "$FORK_CACHE_UPDATES" "$ABANDONED_CACHE_UPDATES"
-
-echo -e "${GREEN}${BOLD}✅ Scan completed successfully!${RESET}"
+echo -e "${GREEN}${BOLD}Scan completed successfully!${RESET}"
