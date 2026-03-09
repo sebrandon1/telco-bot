@@ -36,7 +36,8 @@ NUMBER_OF_RECORDS=$(jq '.jobs | length' "$JSON_FILE")
 
 RUNS_BY_COMMIT_CTR=0
 
-MESSAGE="There have been $NUMBER_OF_RECORDS DCI jobs that have used the certsuite in the last $DAYS_BACK days.\n"
+MESSAGE="There have been $NUMBER_OF_RECORDS DCI jobs that have used the certsuite in the last $DAYS_BACK days.
+"
 
 VERSIONS_BY_VALUE=$(jq '.jobs | group_by(.certsuite_version) | map({key: .[0].certsuite_version, value: length})' "$JSON_FILE")
 
@@ -48,12 +49,15 @@ for row in $(echo "$VERSIONS_BY_VALUE" | jq -r '.[] | @base64'); do
 		VERSION=$(_jq "$row" '.key')
 		COUNT=$(_jq "$row" '.value')
 
-		MESSAGE="$MESSAGE\n Version: $VERSION -- Run Count: $COUNT"
+		MESSAGE="$MESSAGE
+ Version: $VERSION -- Run Count: $COUNT"
 	fi
 done
 
 if [ $RUNS_BY_COMMIT_CTR -gt 0 ]; then
-	MESSAGE="$MESSAGE\n\nThere have been $RUNS_BY_COMMIT_CTR runs by commit hash."
+	MESSAGE="$MESSAGE
+
+There have been $RUNS_BY_COMMIT_CTR runs by commit hash."
 fi
 
 # Use jq to verify OCP_VERSION_FILE is valid JSON
@@ -62,7 +66,9 @@ if ! jq . "$OCP_VERSION_FILE" &>/dev/null; then
 	exit 1
 fi
 
-MESSAGE="$MESSAGE\n\nThe following OCP versions have been tested against in the last $DAYS_BACK days:"
+MESSAGE="$MESSAGE
+
+The following OCP versions have been tested against in the last $DAYS_BACK days:"
 
 for row in $(jq -r '.ocp_versions[] | @base64' "$OCP_VERSION_FILE"); do
 	# Skip any counts that are 0
@@ -73,7 +79,8 @@ for row in $(jq -r '.ocp_versions[] | @base64' "$OCP_VERSION_FILE"); do
 	VERSION=$(_jq "$row" '.ocp_version')
 	COUNT=$(_jq "$row" '.run_count')
 
-	MESSAGE="$MESSAGE\nOCP Version: $VERSION -- Run Count: $COUNT"
+	MESSAGE="$MESSAGE
+OCP Version: $VERSION -- Run Count: $COUNT"
 done
 
 echo "$MESSAGE"
