@@ -115,30 +115,26 @@ check_gomock_pr() {
 	local repo="$1"
 
 	# Use gh search prs to search ALL PRs (not just recent 100)
-	# First try migration-specific terms to avoid false positives
-	local pr_search
-	pr_search=$(gh search prs --repo "$repo" --json number,title,url,state \
-		--limit 10 -- "mockgen deprecated" 2>/dev/null)
+	# Collect results from multiple targeted searches to maximize coverage
+	local search1 search2 search3 pr_search
+	search1=$(gh search prs --repo "$repo" --json number,title,url,state \
+		--limit 10 -- "mockgen deprecated" 2>/dev/null || echo "[]")
+	search2=$(gh search prs --repo "$repo" --json number,title,url,state \
+		--limit 10 -- "uber-go/mock" 2>/dev/null || echo "[]")
+	search3=$(gh search prs --repo "$repo" --json number,title,url,state \
+		--limit 10 -- "mockgen" 2>/dev/null || echo "[]")
 
-	# If no results, try broader but still targeted search
-	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
-		pr_search=$(gh search prs --repo "$repo" --json number,title,url,state \
-			--limit 10 -- "uber-go/mock" 2>/dev/null)
-	fi
+	# Merge and deduplicate results by PR number
+	pr_search=$(echo "$search1 $search2 $search3" |
+		jq -s 'add | unique_by(.number)' 2>/dev/null)
 
-	# Last resort: try golang/mock
-	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
-		pr_search=$(gh search prs --repo "$repo" --json number,title,url,state \
-			--limit 10 -- "golang/mock" 2>/dev/null)
-	fi
-
-	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
+	if [[ -z "$pr_search" || "$pr_search" == "[]" || "$pr_search" == "null" ]]; then
 		echo "none"
 		return
 	fi
 
 	# Filter by title relevance - prefer migration PRs over incidental mentions
-	# gh search prs returns state as "open"/"closed" (lowercase), and no mergedAt field
+	# gh search prs returns state as "open"/"closed"/"merged" (lowercase)
 	local pr_info
 	pr_info=$(echo "$pr_search" | jq -r '
 		# First try to find migration-specific PRs
@@ -150,7 +146,7 @@ check_gomock_pr() {
 	' 2>/dev/null)
 
 	if [[ -n "$pr_info" && "$pr_info" != "null" ]]; then
-		# gh search prs reports merged PRs as "closed" - check if actually merged
+		# gh search prs sometimes reports merged PRs as "closed" - check if actually merged
 		local pr_state
 		pr_state=$(echo "$pr_info" | cut -d';' -f3)
 		if [[ "$pr_state" == "closed" ]]; then
