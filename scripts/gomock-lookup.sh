@@ -114,25 +114,54 @@ declare -a DEPRECATED_REPOS
 check_gomock_pr() {
 	local repo="$1"
 
+	# Use gh search prs to search ALL PRs (not just recent 100)
+	# First try migration-specific terms to avoid false positives
 	local pr_search
-	pr_search=$(gh pr list --repo "$repo" --state all --json number,title,url,state,mergedAt --limit 100 2>/dev/null)
+	pr_search=$(gh search prs --repo "$repo" --json number,title,url,state \
+		--limit 10 -- "mockgen deprecated" 2>/dev/null)
+
+	# If no results, try broader but still targeted search
+	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
+		pr_search=$(gh search prs --repo "$repo" --json number,title,url,state \
+			--limit 10 -- "uber-go/mock" 2>/dev/null)
+	fi
+
+	# Last resort: try golang/mock
+	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
+		pr_search=$(gh search prs --repo "$repo" --json number,title,url,state \
+			--limit 10 -- "golang/mock" 2>/dev/null)
+	fi
 
 	if [[ $? -ne 0 || -z "$pr_search" || "$pr_search" == "[]" ]]; then
 		echo "none"
 		return
 	fi
 
+	# Filter by title relevance - prefer migration PRs over incidental mentions
+	# gh search prs returns state as "open"/"closed" (lowercase), and no mergedAt field
 	local pr_info
-	pr_info=$(echo "$pr_search" | jq -r '.[] | select(.title | test("gomock|mockgen|golang/mock|uber-go/mock|uber.org/mock|go.uber.org/mock"; "i")) |
-		if .mergedAt != null then
-			"#" + (.number|tostring) + ";" + .url + ";merged"
-		elif .state == "OPEN" then
-			"#" + (.number|tostring) + ";" + .url + ";open"
-		else
-			"#" + (.number|tostring) + ";" + .url + ";closed"
-		end' | head -1)
+	pr_info=$(echo "$pr_search" | jq -r '
+		# First try to find migration-specific PRs
+		[.[] | select(.title | test("deprecat|migrate|replace|switch.*mock|uber.*mock|mock.*uber"; "i"))] as $migration |
+		# Fall back to any PR mentioning gomock/mockgen
+		[.[] | select(.title | test("gomock|mockgen|golang/mock|uber-go/mock|go.uber.org/mock"; "i"))] as $all |
+		(if ($migration | length) > 0 then $migration[0] else ($all[0] // empty) end) |
+		"#" + (.number|tostring) + ";" + .url + ";" + .state
+	' 2>/dev/null)
 
-	if [[ -n "$pr_info" ]]; then
+	if [[ -n "$pr_info" && "$pr_info" != "null" ]]; then
+		# gh search prs reports merged PRs as "closed" - check if actually merged
+		local pr_state
+		pr_state=$(echo "$pr_info" | cut -d';' -f3)
+		if [[ "$pr_state" == "closed" ]]; then
+			local pr_number
+			pr_number=$(echo "$pr_info" | cut -d';' -f1 | sed 's/#//')
+			local merged_at
+			merged_at=$(gh pr view "$pr_number" --repo "$repo" --json mergedAt --jq '.mergedAt' 2>/dev/null)
+			if [[ -n "$merged_at" && "$merged_at" != "null" && "$merged_at" != "" ]]; then
+				pr_info=$(echo "$pr_info" | sed 's/;closed$/;merged/')
+			fi
+		fi
 		echo "$pr_info"
 	else
 		echo "none"
@@ -559,25 +588,25 @@ if [ $FOUND_COUNT -gt 0 ]; then
 				last_commit_display=$(format_date "$last_commit")
 
 				if [ "$pr_status" = "none" ] || [ -z "$pr_status" ]; then
-					pr_display="---"
+					pr_display="—"
 				else
 					pr_number=$(echo "$pr_status" | cut -d';' -f1)
 					pr_url=$(echo "$pr_status" | cut -d';' -f2)
 					pr_state=$(echo "$pr_status" | cut -d';' -f3)
 
 					case "$pr_state" in
-					"merged") pr_emoji="V" ;;
+					"merged") pr_emoji="✅" ;;
 					"open")
-						pr_emoji="O"
+						pr_emoji="🔄"
 						if [ -n "$pr_rebase_status" ]; then
 							case "$pr_rebase_status" in
-							"needs_rebase") pr_emoji="! O" ;;
-							"has_conflicts") pr_emoji="!! O" ;;
-							"up_to_date") pr_emoji="V O" ;;
+							"needs_rebase") pr_emoji="⚠️ 🔄" ;;
+							"has_conflicts") pr_emoji="❌ 🔄" ;;
+							"up_to_date") pr_emoji="✅ 🔄" ;;
 							esac
 						fi
 						;;
-					"closed") pr_emoji="X" ;;
+					"closed") pr_emoji="❌" ;;
 					*) pr_emoji="" ;;
 					esac
 
