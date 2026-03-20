@@ -35,6 +35,8 @@ jobs:
       - name: Build the go-dci project
         run: go build
         working-directory: go-dci
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Set the config file via the go-dci project
         run: ./go-dci config set --accesskey=${{ secrets.DCI_ACCESS_KEY }} --secretkey=${{ secrets.DCI_SECRET_KEY }}

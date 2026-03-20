@@ -38,6 +38,8 @@ jobs:
       - name: Build the go-quay project
         run: go build
         working-directory: go-quay
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Run the go-quay project to gather the last 7 days of Quay statistics
         run: |
