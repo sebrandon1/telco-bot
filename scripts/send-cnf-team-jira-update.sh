@@ -1,9 +1,7 @@
 #!/bin/bash
 
-# Usage: ./send-cnf-team-jira-update.sh <slack_webhook_url> <json_file>
-# Requires: jq, curl
-
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/slack.sh"
 
 if [[ $# -lt 2 ]]; then
 	echo "Usage: $0 <slack_webhook_url> <json_file>"
@@ -13,35 +11,35 @@ fi
 SLACK_WEBHOOK_URL="$1"
 JSON_FILE="$2"
 
-# Build the Slack message content
-MESSAGE=$(jq -r '
-  def fixver_counts:
-    [ .[] | .issues[] | {fixVersion} ]
-    | group_by(.fixVersion)
-    | map({fixVersion: .[0].fixVersion, count: length});
+validate_json "$JSON_FILE" || exit 1
 
-  def fixver_summary:
-    fixver_counts
-    | map("- " + (if .fixVersion == "none" then "No Fix Version" else .fixVersion end) + ": " + (.count | tostring) + " issues")
-    | join("\n");
+TOTAL_ISSUES=$(jq '[.[] | .issues | length] | add // 0' "$JSON_FILE")
+MEMBER_COUNT=$(jq 'length' "$JSON_FILE")
 
-  ([ .[] |
-    (.user + " (" + ((.issues | length | tostring)) + " issues assigned):\n") +
-    (
-      if ((.issues // []) | type) != "array" or ((.issues // []) | length) == 0 then
-        "  - No issues"
-      else
-        (.issues | map(
-          .url + " (" + (if .fixVersion == "none" then "No Fix Version" else .fixVersion end) + ") - Status: " + .status + " - Last Updated: " + (.updated | split("T")[0])
-        ) | join("\n"))
-      end
-    )
-  ] | join("\n")) +
-  "\n\nTeam Issue Totals by Fix Version:\n" + fixver_summary
+FIXVER_SUMMARY=$(jq -r '
+  [.[] | .issues[]] | group_by(.fixVersion)
+  | map({v: .[0].fixVersion, c: length})
+  | sort_by(.c) | reverse
+  | map("   " + (if .v == "none" then "No Fix Version" else .v end) + ": " + (.c | tostring) + " issues")
+  | join("\n")
 ' "$JSON_FILE")
 
-# Construct the Slack payload for Workflow webhooks (text only)
-payload=$(jq -n --arg text "$MESSAGE" '{text: $text}')
+USER_SECTIONS=$(jq -r '.[] |
+  ":bust_in_silhouette: " + .user + " (" + (.issues | length | tostring) + " issues):\n" +
+  (.issues | sort_by(.updated) | map(
+    "   " + .url + " (" + (if .fixVersion == "none" then "No Fix Version" else .fixVersion end) + ") — " + .status + " — Updated: " + (.updated | split("T")[0])
+  ) | join("\n")) + "\n"
+' "$JSON_FILE")
 
-# Send to Slack
-curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+MESSAGE=":clipboard: CNF Team Jira Weekly Update
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+:busts_in_silhouette: Team Members: ${MEMBER_COUNT}
+:ticket: Open Issues: ${TOTAL_ISSUES}
+
+:bar_chart: Issues by Fix Version:
+${FIXVER_SUMMARY}
+
+${USER_SECTIONS}"
+
+send_slack_message "$SLACK_WEBHOOK_URL" "$MESSAGE" "text"

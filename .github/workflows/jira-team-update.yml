@@ -34,7 +34,7 @@ jobs:
         with:
           repository: 'sebrandon1/jiracrawler'
           path: jiracrawler
-          ref: v0.0.3
+          ref: v0.0.22
 
       - name: Build the jiracrawler project
         run: make build
@@ -48,7 +48,14 @@ jobs:
         run: ./jiracrawler get assignedissues ${USERS} --projectID ${PROJECT_ID} -o json > ${GITHUB_WORKSPACE}/jira-output-raw.json
         working-directory: jiracrawler
 
-      # This santiizes the raw JSON output from essentially the entire API response into a readable format
+      - name: Validate jiracrawler output is valid JSON
+        run: |
+          if ! jq empty ${GITHUB_WORKSPACE}/jira-output-raw.json 2>/dev/null; then
+            echo "ERROR: jiracrawler produced invalid JSON output:"
+            head -5 ${GITHUB_WORKSPACE}/jira-output-raw.json
+            exit 1
+          fi
+
       - name: Translate the JSON output into a sanitized format
         run: ./scripts/sanitize-raw-jira-format.sh ${GITHUB_WORKSPACE}/jira-output-raw.json ${GITHUB_WORKSPACE}/jira-output.json
 

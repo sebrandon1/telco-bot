@@ -5,6 +5,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/slack.sh"
+
 if [[ $# -ne 2 ]]; then
 	echo "Usage: $0 <input_json_file> <output_json_file>"
 	exit 1
@@ -12,6 +15,8 @@ fi
 
 INPUT_FILE="$1"
 OUTPUT_FILE="$2"
+
+validate_json "$INPUT_FILE" || exit 1
 
 jq -r '[.[] | .issues[] 
   | select(.fields.assignee != null) 
